@@ -34,7 +34,7 @@ pub async fn run(cli: Cli, output: Output) -> Result<()> {
         Command::Start(args) => lifecycle::action("start", cli.config.as_deref(), args, output),
         Command::Stop(args) => lifecycle::action("stop", cli.config.as_deref(), args, output),
         Command::Reload(args) => lifecycle::action("reload", cli.config.as_deref(), args, output),
-        Command::Update(args) => lifecycle::update(args, output),
+        Command::Update(args) => lifecycle::update(cli.config.as_deref(), args, output),
         Command::Version => {
             println!("maskman {}", env!("CARGO_PKG_VERSION"));
             Ok(())

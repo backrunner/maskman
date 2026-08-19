@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
 };
 
@@ -147,11 +148,93 @@ pub async fn cleanup(config: Option<&Path>, args: ActionArgs, output: Output) ->
     Ok(())
 }
 
-pub fn update(args: UpdateArgs, _output: Output) -> Result<()> {
+pub fn update(config: Option<&Path>, args: UpdateArgs, output: Output) -> Result<()> {
+    let config_path = config.map(PathBuf::from).filter(|path| path.exists());
+    let document = config_path
+        .as_deref()
+        .map(maskman_config::load)
+        .transpose()
+        .context("loading update configuration")?;
+    let repository = document
+        .as_ref()
+        .map(|value| value.update.repository.as_str())
+        .unwrap_or("backrunner/maskman");
+    let client = maskman_update::UpdateClient::new(repository, env!("CARGO_PKG_VERSION"))
+        .map_err(|error| anyhow::anyhow!(error))?;
+    let release = client.latest(args.version.as_deref()).map_err(|error| anyhow::anyhow!(error))?;
     if args.check {
-        return Err(anyhow::anyhow!("update check requires the signed release client (M7)"));
+        output.success(format!(
+            "current {}; latest signed {} for {}",
+            client.current_version(),
+            release.version,
+            client.target()
+        ));
+        return Ok(());
     }
-    Err(anyhow::anyhow!("signed update client is not configured in this build"))
+    if !args.yes {
+        if !io::stdin().is_terminal() {
+            anyhow::bail!(
+                "update changes the installed binary; pass --yes in non-interactive mode"
+            );
+        }
+        print!("Install signed maskman {}? [y/N]: ", release.version);
+        io::stdout().flush().context("flushing update confirmation")?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer).context("reading update confirmation")?;
+        if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            anyhow::bail!("update cancelled");
+        }
+    }
+    output.info(format!("downloading signed release {}", release.version));
+    let artifact = client.download_verified(&release).map_err(|error| anyhow::anyhow!(error))?;
+    let binary = std::env::current_exe().context("locating current maskman binary")?;
+    let controller = match config_path.as_deref() {
+        Some(path) => {
+            let compiled = maskman_config::compile(path)
+                .with_context(|| format!("loading config {}", path.display()))?;
+            let spec = maskman_platform::ServiceSpec::new(
+                binary.clone(),
+                absolute_path(path)?,
+                compiled.state_dir,
+            )?;
+            let status = maskman_platform::service_status(&spec)?;
+            status.installed.then_some(PlatformService { spec })
+        }
+        None => None,
+    };
+    let controller_ref =
+        controller.as_ref().map(|value| value as &dyn maskman_update::ServiceController);
+    let outcome = maskman_update::install_verified(
+        &artifact,
+        &binary,
+        config_path.as_deref(),
+        controller_ref,
+    )
+    .map_err(|error| anyhow::anyhow!(error))?;
+    output.success(format!("updated maskman to {}", outcome.version));
+    Ok(())
+}
+
+struct PlatformService {
+    spec: maskman_platform::ServiceSpec,
+}
+
+impl maskman_update::ServiceController for PlatformService {
+    fn stop(&self) -> Result<(), maskman_update::UpdateError> {
+        maskman_platform::service_control(&self.spec, maskman_platform::ServiceAction::Stop)
+            .map_err(|error| maskman_update::UpdateError::Health(error.to_string()))
+    }
+
+    fn start(&self) -> Result<(), maskman_update::UpdateError> {
+        maskman_platform::service_control(&self.spec, maskman_platform::ServiceAction::Start)
+            .map_err(|error| maskman_update::UpdateError::Health(error.to_string()))
+    }
+
+    fn healthy(&self) -> Result<bool, maskman_update::UpdateError> {
+        maskman_platform::service_status(&self.spec)
+            .map(|status| status.running)
+            .map_err(|error| maskman_update::UpdateError::Health(error.to_string()))
+    }
 }
 
 fn require_config(config: Option<&Path>) -> Result<PathBuf> {
