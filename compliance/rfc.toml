@@ -1,0 +1,277 @@
+[profile]
+name = "Maskman v1 HTTP/3 MASQUE codec profile"
+scope = "m2-codec"
+http_versions = ["h3"]
+excluded_http_versions = ["http/1.1", "h2"]
+
+[[requirement]]
+id = "RFC9297-3.2-CAPSULE-FRAME"
+rfc = 9297
+section = "3.2"
+level = "MUST"
+summary = "Capsules use a type varint, length varint, and exactly that value length"
+status = "implemented"
+source = ["crates/maskman-protocol/src/capsule/decoder.rs", "crates/maskman-protocol/src/capsule/encoder.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9297_capsule_golden_vectors"]
+
+[[requirement]]
+id = "RFC9297-3.2-UNKNOWN-SKIP"
+rfc = 9297
+section = "3.2"
+level = "MUST"
+summary = "Unknown capsule types are silently skipped without value allocation"
+status = "implemented"
+source = ["crates/maskman-protocol/src/capsule/decoder.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9297_unknown_and_oversized_capsules_are_streamed"]
+
+[[requirement]]
+id = "RFC9297-3.3-TRUNCATED"
+rfc = 9297
+section = "3.3"
+level = "MUST"
+summary = "A clean stream ending in a truncated capsule is malformed"
+status = "implemented"
+source = ["crates/maskman-protocol/src/capsule/decoder.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9297_truncated_capsule_is_malformed"]
+
+[[requirement]]
+id = "RFC9297-3.5-DATAGRAM"
+rfc = 9297
+section = "3.5"
+level = "MUST"
+summary = "DATAGRAM capsules carry the extension HTTP Datagram payload unchanged"
+status = "implemented"
+source = ["crates/maskman-protocol/src/capsule/datagram.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9297_capsule_golden_vectors"]
+
+[[requirement]]
+id = "RFC9298-2-TARGET-FORMAT"
+rfc = 9298
+section = "2"
+level = "MUST"
+summary = "CONNECT-UDP target host and port are non-empty and syntax checked"
+status = "implemented"
+source = ["crates/maskman-protocol/src/connect/udp.rs", "crates/maskman-protocol/src/connect/mod.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9298_udp_path_golden_vectors"]
+
+[[requirement]]
+id = "RFC9298-2-IPV6-ESCAPE"
+rfc = 9298
+section = "2"
+level = "MUST"
+summary = "IPv6 colons in target_host are percent encoded on the request path"
+status = "implemented"
+source = ["crates/maskman-protocol/src/connect/udp.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9298_udp_path_golden_vectors"]
+
+[[requirement]]
+id = "RFC9298-2-PORT-RANGE"
+rfc = 9298
+section = "2"
+level = "MUST"
+summary = "target_port is restricted to 1 through 65535"
+status = "implemented"
+source = ["crates/maskman-protocol/src/connect/mod.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9298_udp_path_golden_vectors"]
+
+[[requirement]]
+id = "RFC9298-5-CONTEXT-ID"
+rfc = 9298
+section = "5"
+level = "MUST"
+summary = "UDP HTTP Datagram payloads begin with a QUIC variable-length Context ID"
+status = "implemented"
+source = ["crates/maskman-protocol/src/capsule/datagram.rs", "crates/maskman-protocol/src/varint.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9298_context_zero_payload_limit"]
+
+[[requirement]]
+id = "RFC9298-5-UDP-LIMIT"
+rfc = 9298
+section = "5"
+level = "MUST"
+summary = "Context ID zero UDP payloads cannot exceed 65527 bytes"
+status = "implemented"
+source = ["crates/maskman-protocol/src/capsule/datagram.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9298_context_zero_payload_limit"]
+
+[[requirement]]
+id = "RFC9484-4.6-WILDCARD-ESCAPE"
+rfc = 9484
+section = "4.6"
+level = "MUST"
+summary = "Wildcard target and ipproto values are transmitted as percent-encoded %2A"
+status = "implemented"
+source = ["crates/maskman-protocol/src/connect/ip.rs", "crates/maskman-protocol/src/connect/mod.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9484_ip_path_errata_8444"]
+
+[[requirement]]
+id = "RFC9484-4.6-TARGET-PREFIX"
+rfc = 9484
+section = "4.6"
+level = "MUST"
+summary = "IP target prefixes use an aligned address and an in-range decimal prefix length"
+status = "implemented"
+source = ["crates/maskman-protocol/src/connect/ip.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9484_ip_path_errata_8444"]
+
+[[requirement]]
+id = "RFC9484-4.6-IPPROTO-RANGE"
+rfc = 9484
+section = "4.6"
+level = "MUST"
+summary = "ipproto is a decimal integer from 0 through 255 or the wildcard"
+status = "implemented"
+source = ["crates/maskman-protocol/src/connect/ip.rs", "crates/maskman-protocol/src/connect/mod.rs"]
+tests = ["crates/maskman-protocol/src/connect/ip.rs::rejects_nonzero_host_bits_and_bad_protocol"]
+
+[[requirement]]
+id = "RFC9484-4.7.1-ASSIGN-FIELDS"
+rfc = 9484
+section = "4.7.1"
+level = "MUST"
+summary = "ADDRESS_ASSIGN validates IP version, address width, prefix length, and host bits"
+status = "implemented"
+source = ["crates/maskman-protocol/src/capsule/address.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9484_address_capsule_golden_vectors"]
+
+[[requirement]]
+id = "RFC9484-4.7.2-REQUEST-NONEMPTY"
+rfc = 9484
+section = "4.7.2"
+level = "MUST"
+summary = "ADDRESS_REQUEST contains at least one requested address"
+status = "implemented"
+source = ["crates/maskman-protocol/src/capsule/address.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9484_address_capsule_golden_vectors"]
+
+[[requirement]]
+id = "RFC9484-4.7.2-REQUEST-ID"
+rfc = 9484
+section = "4.7.2"
+level = "MUST"
+summary = "ADDRESS_REQUEST IDs are nonzero and unique within the request capsule"
+status = "implemented"
+source = ["crates/maskman-protocol/src/capsule/address.rs"]
+tests = ["crates/maskman-protocol/src/capsule/address.rs::request_requires_nonzero_unique_ids_and_aligned_prefixes"]
+
+[[requirement]]
+id = "RFC9484-4.7.3-ROUTE-FIELDS"
+rfc = 9484
+section = "4.7.3"
+level = "MUST"
+summary = "ROUTE_ADVERTISEMENT validates version, address widths, and inclusive range order"
+status = "implemented"
+source = ["crates/maskman-protocol/src/capsule/route.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9484_route_capsule_golden_vectors"]
+
+[[requirement]]
+id = "RFC9484-4.7.3-ROUTE-ORDER"
+rfc = 9484
+section = "4.7.3"
+level = "MUST"
+summary = "Route ranges are ordered by IP version, protocol, and strictly separated addresses"
+status = "implemented"
+source = ["crates/maskman-protocol/src/capsule/route.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9484_route_order_overlap_and_replacement"]
+
+[[requirement]]
+id = "RFC9484-4.7.3-ROUTE-WILDCARD"
+rfc = 9484
+section = "4.7.3"
+level = "MUST NOT"
+summary = "Wildcard protocol ranges do not overlap non-wildcard ranges"
+status = "implemented"
+source = ["crates/maskman-protocol/src/capsule/route.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9484_route_order_overlap_and_replacement"]
+
+[[requirement]]
+id = "RFC9484-4.7.3-ROUTE-REPLACE"
+rfc = 9484
+section = "4.7.3"
+level = "MUST"
+summary = "Each ROUTE_ADVERTISEMENT supersedes the previous complete route set"
+status = "implemented"
+source = ["crates/maskman-protocol/src/capsule/route.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9484_route_order_overlap_and_replacement"]
+
+[[requirement]]
+id = "RFC9484-5-CONTEXT-ZERO"
+rfc = 9484
+section = "5"
+level = "MUST"
+summary = "Context ID zero is reserved for full IP payloads"
+status = "implemented"
+source = ["crates/maskman-protocol/src/capsule/datagram.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9484_ip_packet_validation_and_hop_limit"]
+
+[[requirement]]
+id = "RFC9484-6-IP-PACKET"
+rfc = 9484
+section = "6"
+level = "MUST"
+summary = "Context zero payloads are parsed as complete IP packets"
+status = "implemented"
+source = ["crates/maskman-protocol/src/packet/mod.rs", "crates/maskman-protocol/src/packet/ipv4.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9484_ip_packet_validation_and_hop_limit"]
+
+[[requirement]]
+id = "RFC9484-4.8-IPV6-EXTENSIONS"
+rfc = 9484
+section = "4.8"
+level = "MUST"
+summary = "IPv6 extension headers are walked to the outermost non-extension protocol"
+status = "implemented"
+source = ["crates/maskman-protocol/src/packet/ipv6.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9484_ipv6_extension_chain_is_bounded"]
+
+[[requirement]]
+id = "RFC9484-7.2-HOP-DECREMENT"
+rfc = 9484
+section = "7.2"
+level = "MUST"
+summary = "Forwarded IP packets decrement TTL or Hop Limit exactly once before encapsulation"
+status = "implemented"
+source = ["crates/maskman-protocol/src/packet/mod.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9484_ip_packet_validation_and_hop_limit"]
+
+[[requirement]]
+id = "MASKMAN-SECURITY-DEFAULT-SCOPE"
+rfc = 9484
+section = "7.2"
+level = "MUST NOT"
+summary = "The protocol scope classifier denies private, local, multicast, and reserved destinations by default"
+status = "implemented"
+source = ["crates/maskman-protocol/src/packet/scope.rs"]
+tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9484_special_address_scope_is_default_denied"]
+
+[[requirement]]
+id = "MASKMAN-V1-HTTP3-ONLY"
+rfc = 9114
+section = "4"
+level = "MUST"
+summary = "The declared v1 transport profile is HTTP/3 only"
+status = "implemented"
+source = ["crates/maskman-server/src/request.rs", ".agents/01-research-and-scope.md"]
+tests = ["crates/maskman-server/src/transport_tests.rs::connect_udp_supports_both_datagram_paths_and_migration"]
+
+[[requirement]]
+id = "MASKMAN-V1-NO-HTTP11"
+rfc = 9114
+section = "profile"
+level = "MUST NOT"
+summary = "HTTP/1.1 Upgrade is outside the v1 implementation profile"
+status = "not-applicable"
+source = []
+tests = []
+reason = "v1 intentionally exposes HTTP/3 Extended CONNECT only; a future compatibility profile requires separate evidence"
+
+[[requirement]]
+id = "MASKMAN-V1-NO-H2"
+rfc = 9114
+section = "profile"
+level = "MUST NOT"
+summary = "HTTP/2 Extended CONNECT is outside the v1 implementation profile"
+status = "not-applicable"
+source = []
+tests = []
+reason = "v1 intentionally exposes HTTP/3 Extended CONNECT only; a future compatibility profile requires separate evidence"

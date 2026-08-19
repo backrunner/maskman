@@ -1,5 +1,7 @@
 /target/
-/.cargo/
+/.cargo/*
+!/.cargo/config.toml
+fuzz/target/
 *.swp
 *.tmp
 .DS_Store

@@ -1,0 +1,57 @@
+[package]
+name = "maskman-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+maskman-protocol = { path = "../crates/maskman-protocol" }
+
+[[bin]]
+name = "capsule_decoder"
+path = "fuzz_targets/capsule_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "datagram_payload"
+path = "fuzz_targets/datagram_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "connect_request_path"
+path = "fuzz_targets/connect_request_path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipv4_packet"
+path = "fuzz_targets/ipv4_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipv6_packet_extensions"
+path = "fuzz_targets/ipv6_packet_extensions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "route_advertisement"
+path = "fuzz_targets/route_advertisement.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

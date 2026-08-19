@@ -7,6 +7,7 @@ members = [
     "crates/maskman-server",
     "crates/maskman-platform",
     "crates/maskman-update",
+    "xtask",
 ]
 default-members = ["crates/maskman"]
 

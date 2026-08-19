@@ -109,19 +109,21 @@ async fn assert_capsule_round_trip(stream: &mut RequestStream) {
         .unwrap_or_else(|error| panic!("wait for DATAGRAM capsule: {error}"))
         .unwrap_or_else(|error| panic!("receive DATAGRAM capsule: {error}"))
         .unwrap_or_else(|| panic!("DATAGRAM capsule stream ended"));
-    let mut decoder = maskman_protocol::capsule::Decoder::default();
+    let limits = maskman_protocol::capsule::CapsuleLimits::uniform(65_535);
+    let mut decoder = maskman_protocol::capsule::Decoder::new(limits);
     let mut decoded = Vec::new();
     while echoed.has_remaining() {
         let chunk = echoed.chunk();
         let chunk_length = chunk.len();
         decoded.extend(
             decoder
-                .push(chunk, 65_535)
+                .push(chunk)
                 .unwrap_or_else(|error| panic!("decode echoed DATAGRAM capsule: {error}")),
         );
         echoed.advance(chunk_length);
     }
-    assert_eq!(decoded, vec![capsule]);
+    decoder.finish().unwrap_or_else(|error| panic!("finish echoed DATAGRAM capsule: {error}"));
+    assert_eq!(decoded, vec![maskman_protocol::capsule::DecodeEvent::Capsule(capsule)]);
 }
 
 fn assert_oversized_datagram_is_rejected(connection: &quinn::Connection, stream_id: u64) {

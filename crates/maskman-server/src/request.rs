@@ -21,7 +21,7 @@ pub enum RequestError {
     #[error("failed while draining HTTP/3 request: {0}")]
     Drain(#[source] h3::error::StreamError),
     #[error("invalid capsule on HTTP/3 request stream: {0}")]
-    Capsule(#[from] maskman_protocol::capsule::CapsuleError),
+    Capsule(#[from] maskman_protocol::capsule::DecoderError),
     #[error("failed to encode capsule on HTTP/3 request stream: {0}")]
     CapsuleEncode(#[from] maskman_protocol::varint::VarIntError),
 }
@@ -45,14 +45,18 @@ pub async fn handle(
         stream.finish().await.map_err(RequestError::Response)?;
         return Ok(());
     }
-    let mut decoder = maskman_protocol::capsule::Decoder::default();
+    let limits = maskman_protocol::capsule::CapsuleLimits::uniform(MAX_SPIKE_CAPSULE_VALUE_BYTES);
+    let mut decoder = maskman_protocol::capsule::Decoder::new(limits);
     while let Some(mut data) = stream.recv_data().await.map_err(RequestError::Drain)? {
         while data.has_remaining() {
             let chunk = data.chunk();
             let chunk_length = chunk.len();
-            let capsules = decoder.push(chunk, MAX_SPIKE_CAPSULE_VALUE_BYTES)?;
+            let capsules = decoder.push(chunk)?;
             data.advance(chunk_length);
-            for capsule in capsules {
+            for event in capsules {
+                let maskman_protocol::capsule::DecodeEvent::Capsule(capsule) = event else {
+                    continue;
+                };
                 if capsule.capsule_type != maskman_protocol::capsule::DATAGRAM_CAPSULE {
                     continue;
                 }
@@ -62,6 +66,7 @@ pub async fn handle(
             }
         }
     }
+    decoder.finish()?;
     stream.finish().await.map_err(RequestError::Response)
 }
 
