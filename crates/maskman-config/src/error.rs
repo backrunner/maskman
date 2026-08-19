@@ -8,6 +8,8 @@ use crate::validate::ValidationError;
 pub enum ConfigError {
     #[error("failed to read config {path}: {source}")]
     Read { path: PathBuf, source: io::Error },
+    #[error("failed to write config {path}: {source}")]
+    Write { path: PathBuf, source: io::Error },
     #[error("config is not valid UTF-8: {0}")]
     Utf8(#[from] std::str::Utf8Error),
     #[error("config path must end in .toml or .json: {0}")]

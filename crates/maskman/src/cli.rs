@@ -23,10 +23,14 @@ pub enum ColorChoice {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum Command {
     Setup(SetupArgs),
     #[command(subcommand)]
     Config(ConfigCommand),
+    #[command(subcommand)]
+    Auth(AuthCommand),
+    Completions(CompletionsArgs),
     Serve,
     Status(StatusArgs),
     Install(ActionArgs),
@@ -51,6 +55,36 @@ pub struct SetupArgs {
     pub development: bool,
     #[arg(long)]
     pub yes: bool,
+    #[arg(long = "listen", value_name = "ADDR")]
+    pub listen: Vec<String>,
+    #[arg(long)]
+    pub base_path: Option<String>,
+    #[arg(long)]
+    pub state_dir: Option<String>,
+    #[arg(long)]
+    pub certificate_file: Option<String>,
+    #[arg(long)]
+    pub private_key_file: Option<String>,
+    #[arg(long)]
+    pub client_ca_file: Option<String>,
+    #[arg(long, value_enum, default_value_t = AuthModeArg::BearerOrMtls)]
+    pub auth_mode: AuthModeArg,
+    #[arg(long, default_value = "admin")]
+    pub principal_id: String,
+    #[arg(long, default_value = "tok_initial")]
+    pub token_id: String,
+    #[arg(long)]
+    pub enable_udp: bool,
+    #[arg(long)]
+    pub enable_ip: bool,
+    #[arg(long)]
+    pub ipv4_pool: Option<String>,
+    #[arg(long)]
+    pub ipv6_pool: Option<String>,
+    #[arg(long = "advertise-route", value_name = "CIDR")]
+    pub advertise_routes: Vec<String>,
+    #[arg(long, value_enum, default_value_t = NatModeArg::Disabled)]
+    pub nat_mode: NatModeArg,
 }
 
 #[derive(Debug, Subcommand)]
@@ -59,6 +93,54 @@ pub enum ConfigCommand {
         #[arg(long)]
         check_system: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuthCommand {
+    #[command(subcommand)]
+    Token(TokenCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TokenCommand {
+    Create(TokenCreateArgs),
+    Revoke(TokenRevokeArgs),
+    List(TokenListArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct TokenCreateArgs {
+    #[arg(long)]
+    pub id: Option<String>,
+    #[arg(long)]
+    pub principal: Option<String>,
+    #[arg(long)]
+    pub expires_at: Option<String>,
+    #[arg(long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub reload: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenRevokeArgs {
+    pub id: String,
+    #[arg(long)]
+    pub yes: bool,
+    #[arg(long)]
+    pub reload: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct TokenListArgs {
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct CompletionsArgs {
+    #[arg(value_enum)]
+    pub shell: clap_complete::Shell,
 }
 
 #[derive(Debug, Args)]
@@ -89,6 +171,41 @@ pub struct UpdateArgs {
 pub enum ConfigFormatArg {
     Toml,
     Json,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum AuthModeArg {
+    Bearer,
+    Mtls,
+    #[value(name = "bearer-or-mtls")]
+    BearerOrMtls,
+    None,
+}
+
+impl AuthModeArg {
+    pub fn into_model(self) -> maskman_config::AuthMode {
+        match self {
+            Self::Bearer => maskman_config::AuthMode::Bearer,
+            Self::Mtls => maskman_config::AuthMode::Mtls,
+            Self::BearerOrMtls => maskman_config::AuthMode::BearerOrMtls,
+            Self::None => maskman_config::AuthMode::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum NatModeArg {
+    Disabled,
+    Managed,
+}
+
+impl NatModeArg {
+    pub fn into_model(self) -> maskman_config::model::NatMode {
+        match self {
+            Self::Disabled => maskman_config::model::NatMode::Disabled,
+            Self::Managed => maskman_config::model::NatMode::Managed,
+        }
+    }
 }
 
 impl ConfigFormatArg {

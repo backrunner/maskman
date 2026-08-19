@@ -1,3 +1,5 @@
+mod auth;
+mod completions;
 mod config;
 mod lifecycle;
 mod setup;
@@ -13,6 +15,15 @@ pub async fn run(cli: Cli, output: Output) -> Result<()> {
     match cli.command {
         Command::Setup(args) => setup::run(cli.config.as_deref(), args, output),
         Command::Config(command) => config::run(cli.config.as_deref(), command, output),
+        Command::Auth(auth_command) => match auth_command {
+            crate::cli::AuthCommand::Token(token_command) => {
+                auth::run(cli.config.as_deref(), token_command, output)
+            }
+        },
+        Command::Completions(args) => {
+            completions::run(args, output);
+            Ok(())
+        }
         Command::Serve => lifecycle::serve(cli.config.as_deref(), output).await,
         Command::Status(args) => lifecycle::status(cli.config.as_deref(), args, output),
         Command::Install(args) => lifecycle::action("install", cli.config.as_deref(), args, output),
