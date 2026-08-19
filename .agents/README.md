@@ -1,6 +1,6 @@
 # Maskman 实现方案索引
 
-状态：M0 工程基线、M1 HTTP/3 transport spike、M2 protocol compliance core 和 M3 认证/CONNECT-UDP 已实现；CONNECT-IP 与平台副作用仍按里程碑推进
+状态：M0 工程基线、M1 HTTP/3 transport spike、M2 protocol compliance core、M3 认证/CONNECT-UDP 和 M4 CONNECT-IP 核心数据面已实现；特权网络配置、service、CLI 运维和 signed update 仍按里程碑推进
 调研基线：2026-08-20
 目标：单一 Rust 二进制，作为长期运行的 MASQUE daemon，同时提供安装、配置、生命周期管理和自更新 CLI。
 
@@ -31,6 +31,7 @@
 - [08-transport-spike.md](08-transport-spike.md)：M1 固定依赖、transport gate、互操作结果和已知上游缺口。
 - [09-protocol-compliance.md](09-protocol-compliance.md)：M2 codec、属性/fuzz/golden 证据和执行门禁结果。
 - [10-auth-and-udp.md](10-auth-and-udp.md)：M3 authentication、policy、DNS 固定解析和 CONNECT-UDP 数据面证据。
+- [11-connect-ip.md](11-connect-ip.md)：M4 CONNECT-IP session、地址池、packet enforcement、TUN 边界和 Linux netlink 证据。
 - [skills/maskman-guard/SKILL.md](skills/maskman-guard/SKILL.md)：后续开发和审查必须使用的工程 guard。
 
 ## v1 完成定义

@@ -18,6 +18,7 @@ pub enum PolicyError {
 pub struct EffectivePolicy {
     roles: Vec<CompiledRole>,
     pub limits: CompiledLimits,
+    allowed_ip_protocols: Vec<String>,
 }
 
 impl EffectivePolicy {
@@ -36,6 +37,19 @@ impl EffectivePolicy {
             Err(PolicyError::Destination)
         }
     }
+
+    pub fn authorize_ip_protocol(&self, protocol: u8) -> Result<(), PolicyError> {
+        if self.allowed_ip_protocols.iter().any(|value| value == "*")
+            || self
+                .allowed_ip_protocols
+                .iter()
+                .any(|value| value.parse::<u8>().ok() == Some(protocol))
+        {
+            Ok(())
+        } else {
+            Err(PolicyError::Capability)
+        }
+    }
 }
 
 pub fn compile(config: Arc<CompiledConfig>, principal: &Principal) -> EffectivePolicy {
@@ -52,7 +66,9 @@ pub fn compile(config: Arc<CompiledConfig>, principal: &Principal) -> EffectiveP
             egress_bytes_per_second: 0,
             burst_bytes: 0,
         });
-    EffectivePolicy { roles, limits }
+    let allowed_ip_protocols =
+        roles.iter().flat_map(|role| role.allowed_ip_protocols.iter().cloned()).collect();
+    EffectivePolicy { roles, limits, allowed_ip_protocols }
 }
 
 fn destination_allowed(role: &CompiledRole, address: IpAddr) -> bool {

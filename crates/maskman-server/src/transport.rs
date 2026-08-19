@@ -1,13 +1,25 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
+};
 
 use bytes::Bytes;
 use maskman_config::CompiledConfig;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::{sync::watch, task::JoinSet};
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinSet,
+};
 
 use crate::{
-    datagram, request,
+    datagram,
+    proxy::{address_pool::AddressPoolSet, ip::IpSessionRegistry},
+    request,
     session::{QuotaState, SessionRegistry},
     tls,
 };
@@ -57,11 +69,37 @@ pub struct TransportServer {
 pub struct TransportContext {
     pub(crate) config: Arc<CompiledConfig>,
     pub(crate) quotas: Arc<QuotaState>,
+    pub(crate) ip_registry: Arc<IpSessionRegistry>,
+    pub(crate) address_pools: Arc<AddressPoolSet>,
+    pub(crate) tun_tx: mpsc::Sender<Bytes>,
+    tun_rx: Mutex<Option<mpsc::Receiver<Bytes>>>,
+    next_connection_id: AtomicU64,
 }
 
 impl TransportContext {
     pub fn new(config: Arc<CompiledConfig>) -> Self {
-        Self { config, quotas: Arc::new(QuotaState::default()) }
+        let (tun_tx, tun_rx) = mpsc::channel(64);
+        Self {
+            address_pools: Arc::new(AddressPoolSet::from_config(&config.ip)),
+            config,
+            quotas: Arc::new(QuotaState::default()),
+            ip_registry: Arc::new(IpSessionRegistry::default()),
+            tun_tx,
+            tun_rx: Mutex::new(Some(tun_rx)),
+            next_connection_id: AtomicU64::new(1),
+        }
+    }
+
+    pub fn take_tun_receiver(&self) -> Option<mpsc::Receiver<Bytes>> {
+        self.tun_rx.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+    }
+
+    pub fn dispatch_tun_packet(&self, payload: Bytes) -> bool {
+        self.ip_registry.dispatch_tun(payload).is_ok()
+    }
+
+    fn next_connection_id(&self) -> u64 {
+        self.next_connection_id.fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -222,6 +260,7 @@ async fn handle_connection(
     let connection = incoming.await?;
     let peer_certificate_sha256 = peer_certificate_sha256(&connection);
     let datagram_connection = connection.clone();
+    let connection_id = context.as_ref().map(|context| context.next_connection_id());
     let quic = h3_quinn::Connection::new(connection);
     let mut builder = h3::server::builder();
     builder
@@ -235,6 +274,7 @@ async fn handle_connection(
         mode,
         shutdown,
         context,
+        connection_id,
         peer_certificate_sha256,
     )
     .await
@@ -246,6 +286,7 @@ async fn drive_connection(
     mode: TransportMode,
     mut shutdown: watch::Receiver<bool>,
     context: Option<Arc<TransportContext>>,
+    connection_id: Option<u64>,
     peer_certificate_sha256: Option<[u8; 32]>,
 ) -> Result<(), TransportError> {
     let registry = Arc::new(SessionRegistry::default());
@@ -267,7 +308,11 @@ async fn drive_connection(
                         config: context.config.clone(),
                         registry: registry.clone(),
                         quotas: context.quotas.clone(),
+                        ip_registry: context.ip_registry.clone(),
+                        address_pools: context.address_pools.clone(),
+                        tun_sender: context.tun_tx.clone(),
                         connection: datagram_connection.clone(),
+                        connection_id: connection_id.unwrap_or_default(),
                         peer_certificate_sha256,
                     });
                     tokio::spawn(async move {
@@ -282,7 +327,14 @@ async fn drive_connection(
                     continue;
                 };
                 if context.is_some() {
-                    forward_datagram(&registry, datagram.stream_id, datagram.payload, 65_527);
+                    forward_datagram(
+                        &registry,
+                        context.as_ref().map(|context| context.ip_registry.as_ref()),
+                        connection_id.unwrap_or_default(),
+                        datagram.stream_id,
+                        datagram.payload,
+                        65_527,
+                    );
                 } else if mode == TransportMode::EchoDatagrams {
                     let encoded = datagram::encode(datagram.stream_id, datagram.payload)
                         .map_err(|error| TransportError::Datagram(error.to_string()))?;
@@ -297,6 +349,8 @@ async fn drive_connection(
 
 fn forward_datagram(
     registry: &SessionRegistry,
+    ip_registry: Option<&IpSessionRegistry>,
+    connection_id: u64,
     stream_id: u64,
     payload: Bytes,
     max_payload: usize,
@@ -307,7 +361,12 @@ fn forward_datagram(
     if datagram.context_id != 0 || datagram.payload.len() > max_payload {
         return;
     }
-    let _ = registry.try_send(stream_id, Bytes::copy_from_slice(datagram.payload));
+    let payload = Bytes::copy_from_slice(datagram.payload);
+    if !registry.try_send(stream_id, payload.clone()) {
+        if let Some(ip_registry) = ip_registry {
+            let _ = ip_registry.try_send(connection_id, stream_id, payload);
+        }
+    }
 }
 
 fn peer_certificate_sha256(connection: &quinn::Connection) -> Option<[u8; 32]> {

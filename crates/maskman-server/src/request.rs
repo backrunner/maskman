@@ -15,7 +15,11 @@ use tokio::sync::mpsc;
 use crate::{
     auth::{AuthError, Authenticator},
     policy::{self, PolicyError},
-    proxy::{resolver, udp},
+    proxy::{
+        address_pool::AddressPoolSet,
+        ip::{IpControlError, IpSessionRegistry},
+        resolver, udp,
+    },
     session::{QuotaState, SessionRegistry},
 };
 
@@ -32,7 +36,11 @@ pub struct RequestContext {
     pub config: Arc<CompiledConfig>,
     pub registry: Arc<SessionRegistry>,
     pub quotas: Arc<QuotaState>,
+    pub ip_registry: Arc<IpSessionRegistry>,
+    pub address_pools: Arc<AddressPoolSet>,
+    pub tun_sender: mpsc::Sender<Bytes>,
     pub connection: quinn::Connection,
+    pub connection_id: u64,
     pub peer_certificate_sha256: Option<[u8; 32]>,
 }
 
@@ -48,8 +56,16 @@ pub enum RequestError {
     Capsule(#[from] capsule::DecoderError),
     #[error("failed to encode capsule on HTTP/3 request stream: {0}")]
     CapsuleEncode(#[from] maskman_protocol::varint::VarIntError),
+    #[error("invalid address capsule: {0}")]
+    Address(#[from] capsule::AddressError),
+    #[error("invalid HTTP datagram payload: {0}")]
+    DatagramPayload(#[from] capsule::DatagramError),
     #[error("failed to create connected UDP socket: {0}")]
     Udp(#[source] std::io::Error),
+    #[error("invalid CONNECT-IP control capsule: {0}")]
+    IpControl(#[from] IpControlError),
+    #[error("failed to send QUIC datagram: {0}")]
+    Datagram(String),
 }
 
 pub async fn handle(
@@ -103,12 +119,20 @@ async fn handle_echo(
 
 async fn handle_proxy(
     request: Request<()>,
+    stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    context: RequestContext,
+) -> Result<(), RequestError> {
+    if is_connect_udp(&request) {
+        return handle_udp(request, stream, context).await;
+    }
+    crate::request_ip::handle(request, stream, context).await
+}
+
+async fn handle_udp(
+    request: Request<()>,
     mut stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     context: RequestContext,
 ) -> Result<(), RequestError> {
-    if !is_connect_udp(&request) {
-        return reject(stream, StatusCode::BAD_REQUEST, false).await;
-    }
     let target = match parse_udp_path(request.uri().path(), &context.config.base_path) {
         Ok(target) => target,
         Err(_) => return reject(stream, StatusCode::BAD_REQUEST, false).await,
@@ -233,7 +257,7 @@ fn is_connect_udp(request: &Request<()>) -> bool {
         && request.headers().get("capsule-protocol") == Some(&HeaderValue::from_static("?1"))
 }
 
-async fn reject(
+pub(crate) async fn reject(
     mut stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     status: StatusCode,
     capsule_protocol: bool,
@@ -245,7 +269,7 @@ async fn reject(
     stream.finish().await.map_err(RequestError::Response)
 }
 
-async fn reject_auth(
+pub(crate) async fn reject_auth(
     mut stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     _error: AuthError,
 ) -> Result<(), RequestError> {
@@ -257,7 +281,7 @@ async fn reject_auth(
     stream.finish().await.map_err(RequestError::Response)
 }
 
-async fn reject_policy(
+pub(crate) async fn reject_policy(
     stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     _error: PolicyError,
 ) -> Result<(), RequestError> {
@@ -271,7 +295,7 @@ async fn reject_resolver(
     reject(stream, StatusCode::BAD_GATEWAY, false).await
 }
 
-fn response(status: StatusCode, capsule_protocol: bool) -> http::Response<()> {
+pub(crate) fn response(status: StatusCode, capsule_protocol: bool) -> http::Response<()> {
     let mut headers = HeaderMap::new();
     if capsule_protocol {
         headers.insert("capsule-protocol", HeaderValue::from_static("?1"));

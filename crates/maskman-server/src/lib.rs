@@ -11,9 +11,11 @@ mod datagram;
 mod policy;
 mod proxy;
 mod request;
+mod request_ip;
 mod session;
 mod tls;
 mod transport;
+mod tun_bridge;
 
 pub use transport::{
     server_config, TransportContext, TransportError, TransportLimits, TransportMode,
@@ -62,19 +64,46 @@ pub async fn serve(config: CompiledConfig) -> Result<(), ServerError> {
     let mut servers = Vec::with_capacity(config.listen.len());
     let config = std::sync::Arc::new(config);
     let context = std::sync::Arc::new(TransportContext::new(config.clone()));
+    let tun_task = if config.ip.enabled {
+        let mut journal = maskman_platform::NetworkJournal::default();
+        let device = maskman_platform::TunDevice::create(
+            maskman_platform::TunConfig {
+                name: config.ip.interface_name.clone(),
+                mtu: config.ip.mtu as u16,
+            },
+            &mut journal,
+        )
+        .map_err(|error| ServerError::Transport(error.to_string()))?;
+        let receiver = context
+            .take_tun_receiver()
+            .ok_or_else(|| ServerError::Transport("TUN queue was already claimed".to_owned()))?;
+        Some(tokio::spawn(tun_bridge::run(device, context.clone(), receiver)))
+    } else {
+        None
+    };
     for address in config.listen.iter().copied() {
-        servers.push(
-            TransportServer::bind_with_context(
-                address,
-                quic_config.clone(),
-                limits,
-                transport::default_server_mode(),
-                context.clone(),
-            )
-            .map_err(|error| ServerError::Transport(error.to_string()))?,
-        );
+        let server = match TransportServer::bind_with_context(
+            address,
+            quic_config.clone(),
+            limits,
+            transport::default_server_mode(),
+            context.clone(),
+        ) {
+            Ok(server) => server,
+            Err(error) => {
+                if let Some(task) = &tun_task {
+                    task.abort();
+                }
+                return Err(ServerError::Transport(error.to_string()));
+            }
+        };
+        servers.push(server);
     }
-    run_servers(servers).await
+    let result = run_servers(servers).await;
+    if let Some(task) = tun_task {
+        task.abort();
+    }
+    result
 }
 
 async fn run_servers(servers: Vec<TransportServer>) -> Result<(), ServerError> {

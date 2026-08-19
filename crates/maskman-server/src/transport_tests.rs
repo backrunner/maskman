@@ -10,6 +10,9 @@ use crate::datagram;
 
 use super::{TransportContext, TransportLimits, TransportMode, TransportServer};
 
+#[path = "ip_transport_tests.rs"]
+mod ip_tests;
+
 type ClientDriver = h3::client::Connection<h3_quinn::Connection, Bytes>;
 type RequestSender = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 type RequestStream = h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;

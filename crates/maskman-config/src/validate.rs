@@ -70,8 +70,12 @@ pub enum ValidationError {
     IpMtu,
     #[error("proxy.ip pool {field} is invalid: {value}")]
     IpPool { field: &'static str, value: String },
+    #[error("proxy.ip requires at least one client address pool when enabled")]
+    IpPoolRequired,
     #[error("proxy.ip pools overlap: {left} and {right}")]
     OverlappingPools { left: String, right: String },
+    #[error("proxy.ip advertise routes are unordered or overlapping")]
+    AdvertiseRoutes,
     #[error("proxy.ip.nat managed mode requires a non-empty egress_interface")]
     NatInterface,
     #[error("observability.metrics_listen is invalid: {0}")]
@@ -266,6 +270,9 @@ fn validate_ip(document: &ConfigDocument) -> Result<(), ValidationError> {
             pools.push((field, network));
         }
     }
+    if pools.is_empty() {
+        return Err(ValidationError::IpPoolRequired);
+    }
     for (index, (_, left)) in pools.iter().enumerate() {
         for (_, right) in pools.iter().skip(index + 1) {
             if left.contains(&right.network()) || right.contains(&left.network()) {
@@ -281,13 +288,42 @@ fn validate_ip(document: &ConfigDocument) -> Result<(), ValidationError> {
     {
         return Err(ValidationError::NatInterface);
     }
-    for route in &document.proxy.ip.advertise_routes {
-        route.parse::<IpNet>().map_err(|_| ValidationError::IpPool {
-            field: "proxy.ip.advertise_routes",
-            value: route.clone(),
-        })?;
+    let routes = document
+        .proxy
+        .ip
+        .advertise_routes
+        .iter()
+        .map(|route| {
+            route.parse::<IpNet>().map_err(|_| ValidationError::IpPool {
+                field: "proxy.ip.advertise_routes",
+                value: route.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    for pair in routes.windows(2) {
+        let left = pair[0];
+        let right = pair[1];
+        if ip_version(left.network()) > ip_version(right.network())
+            || (ip_version(left.network()) == ip_version(right.network())
+                && left.network() > right.network())
+            || (same_ip_version(left.network(), right.network())
+                && left.broadcast() >= right.network())
+        {
+            return Err(ValidationError::AdvertiseRoutes);
+        }
     }
     Ok(())
+}
+
+fn ip_version(address: std::net::IpAddr) -> u8 {
+    match address {
+        std::net::IpAddr::V4(_) => 4,
+        std::net::IpAddr::V6(_) => 6,
+    }
+}
+
+fn same_ip_version(left: std::net::IpAddr, right: std::net::IpAddr) -> bool {
+    ip_version(left) == ip_version(right)
 }
 
 fn check_non_empty(field: &'static str, value: &str) -> Result<(), ValidationError> {

@@ -266,6 +266,46 @@ tests = []
 reason = "v1 intentionally exposes HTTP/3 Extended CONNECT only; a future compatibility profile requires separate evidence"
 
 [[requirement]]
+id = "RFC9484-6-SOURCE-PREFIX"
+rfc = 9484
+section = "6"
+level = "MUST"
+summary = "Outbound IP packets must use an address assigned to the CONNECT-IP session"
+status = "implemented"
+source = ["crates/maskman-server/src/proxy/ip.rs"]
+tests = ["crates/maskman-server/src/proxy/ip.rs::source_and_protocol_are_enforced"]
+
+[[requirement]]
+id = "RFC9484-6-PACKET-SCOPE"
+rfc = 9484
+section = "6"
+level = "MUST"
+summary = "IP packet destination and protocol are checked against URI and principal scope"
+status = "implemented"
+source = ["crates/maskman-server/src/proxy/ip.rs", "crates/maskman-server/src/policy.rs"]
+tests = ["crates/maskman-server/src/proxy/ip.rs::source_and_protocol_are_enforced"]
+
+[[requirement]]
+id = "RFC9484-6-HOP-LIMIT"
+rfc = 9484
+section = "6"
+level = "MUST"
+summary = "Forwarded IP packets decrement IPv4 TTL or IPv6 Hop Limit exactly once"
+status = "implemented"
+source = ["crates/maskman-protocol/src/packet/mod.rs", "crates/maskman-server/src/proxy/ip.rs"]
+tests = ["crates/maskman-server/src/ip_transport_tests.rs::authenticated_connect_ip_assigns_and_forwards_through_tun_boundary"]
+
+[[requirement]]
+id = "RFC9484-4.7.1-SESSION-ASSIGN"
+rfc = 9484
+section = "4.7.1"
+level = "MUST"
+summary = "An authenticated CONNECT-IP session receives a bounded ADDRESS_ASSIGN lease"
+status = "implemented"
+source = ["crates/maskman-server/src/proxy/address_pool.rs", "crates/maskman-server/src/request_ip.rs"]
+tests = ["crates/maskman-server/src/ip_transport_tests.rs::authenticated_connect_ip_assigns_and_forwards_through_tun_boundary"]
+
+[[requirement]]
 id = "MASKMAN-M3-BEARER-HASH"
 rfc = 6750
 section = "2.1"

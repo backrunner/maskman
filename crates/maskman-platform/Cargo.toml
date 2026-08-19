@@ -10,4 +10,10 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+ipnet = "2.11"
+tappers = { version = "0.4.2", features = ["tokio"] }
 thiserror = "2"
+tokio = { version = "1.47", features = ["net", "rt", "sync"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rtnetlink = "0.23"
