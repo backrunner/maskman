@@ -1,6 +1,6 @@
 # Maskman 实现方案索引
 
-状态：架构调研完成，尚未开始产品代码实现
+状态：架构调研完成，M0 Rust workspace 与 CLI/config/protocol 基础已实现；HTTP/3 transport、真实代理和平台副作用仍按里程碑推进
 调研基线：2026-08-20
 目标：单一 Rust 二进制，作为长期运行的 MASQUE daemon，同时提供安装、配置、生命周期管理和自更新 CLI。
 

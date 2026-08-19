@@ -1,0 +1,81 @@
+mod compile;
+mod error;
+mod load;
+pub mod model;
+mod validate;
+
+use std::{
+    path::{Path, PathBuf},
+    str::FromStr,
+};
+
+pub use compile::{CompiledConfig, CompiledIp, CompiledRole, CompiledUdp};
+pub use error::ConfigError;
+pub use load::render;
+pub use model::ConfigDocument;
+pub use validate::{parse_duration, resolve_path, validate, ValidationError};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigFormat {
+    Toml,
+    Json,
+}
+
+impl ConfigFormat {
+    pub fn from_path(path: &Path) -> Result<Self, ConfigError> {
+        match path.extension().and_then(|extension| extension.to_str()) {
+            Some("toml") => Ok(Self::Toml),
+            Some("json") => Ok(Self::Json),
+            _ => Err(ConfigError::UnsupportedFormat(path.to_path_buf())),
+        }
+    }
+}
+
+impl FromStr for ConfigFormat {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "toml" => Ok(Self::Toml),
+            "json" => Ok(Self::Json),
+            _ => Err(ConfigError::UnsupportedFormat(PathBuf::from(value))),
+        }
+    }
+}
+
+pub fn load(path: &Path) -> Result<ConfigDocument, ConfigError> {
+    load::load(path)
+}
+
+pub fn compile(path: &Path) -> Result<CompiledConfig, ConfigError> {
+    let document = load(path)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    compile::compile(&document, base_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{model::ConfigDocument, render, validate, ConfigFormat};
+
+    #[test]
+    fn default_config_round_trips_as_toml() {
+        let document = ConfigDocument::default();
+        let rendered = match render(&document, ConfigFormat::Toml) {
+            Ok(rendered) => rendered,
+            Err(error) => panic!("render: {error}"),
+        };
+        let parsed: ConfigDocument = match toml::from_str(&rendered) {
+            Ok(parsed) => parsed,
+            Err(error) => panic!("parse: {error}"),
+        };
+        if let Err(error) = validate(&parsed) {
+            panic!("defaults validate: {error}");
+        }
+    }
+
+    #[test]
+    fn unknown_fields_are_rejected() {
+        let result = toml::from_str::<ConfigDocument>("schema_version = 1\nunknown = true\n");
+        assert!(result.is_err());
+    }
+}

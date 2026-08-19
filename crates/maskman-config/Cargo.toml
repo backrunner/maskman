@@ -1,0 +1,18 @@
+[package]
+name = "maskman-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ipnet = "2.11"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+time = { version = "0.3", features = ["formatting", "macros", "parsing", "serde"] }
+toml = "0.8"
+
+[lints]
+workspace = true

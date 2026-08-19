@@ -1,0 +1,15 @@
+[package]
+name = "maskman-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+maskman-config = { path = "../maskman-config", version = "0.1.0" }
+maskman-protocol = { path = "../maskman-protocol", version = "0.1.0" }
+thiserror = "2.0"
+
+[lints]
+workspace = true

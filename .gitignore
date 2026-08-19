@@ -1,0 +1,10 @@
+/target/
+/.cargo/
+*.swp
+*.tmp
+.DS_Store
+
+# Local credentials and generated development certificates.
+*.pem
+*.key
+*.secret
