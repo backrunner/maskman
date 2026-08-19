@@ -1,0 +1,4 @@
+interface:
+  display_name: "Maskman Guard"
+  short_description: "Guard Maskman protocol and engineering changes"
+  default_prompt: "Use $maskman-guard to review this Maskman change before committing."
