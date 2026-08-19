@@ -1,6 +1,10 @@
 [advisories]
 version = 2
 
+[[advisories.ignore]]
+id = "RUSTSEC-2024-0436"
+reason = "paste is a compile-time macro used by tun-rs netlink dependencies; replace when upstream migrates"
+
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"

@@ -21,19 +21,22 @@ pub enum TlsError {
     Quinn(String),
     #[error("failed to build client certificate verifier: {0}")]
     ClientVerifier(String),
+    #[error("TLS client certificate authentication requires a client CA file")]
+    MissingClientCa,
 }
 
 pub fn load_server_config(
     certificate_file: &Path,
     private_key_file: &Path,
 ) -> Result<quinn::ServerConfig, TlsError> {
-    load_server_config_with_client_ca(certificate_file, private_key_file, None)
+    load_server_config_with_client_ca(certificate_file, private_key_file, None, false)
 }
 
 pub fn load_server_config_with_client_ca(
     certificate_file: &Path,
     private_key_file: &Path,
     client_ca_file: Option<&Path>,
+    require_client_certificate: bool,
 ) -> Result<quinn::ServerConfig, TlsError> {
     let certificates = load_certificates(certificate_file)?;
     let private_key = load_private_key(private_key_file)?;
@@ -41,14 +44,18 @@ pub fn load_server_config_with_client_ca(
     let mut crypto = match client_ca_file {
         Some(path) => {
             let roots = load_roots(path)?;
-            let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
-                .allow_unauthenticated()
-                .build()
-                .map_err(|error| TlsError::ClientVerifier(error.to_string()))?;
+            let verifier = WebPkiClientVerifier::builder(Arc::new(roots));
+            let verifier = if require_client_certificate {
+                verifier.build()
+            } else {
+                verifier.allow_unauthenticated().build()
+            }
+            .map_err(|error| TlsError::ClientVerifier(error.to_string()))?;
             builder
                 .with_client_cert_verifier(verifier)
                 .with_single_cert(certificates, private_key)?
         }
+        None if require_client_certificate => return Err(TlsError::MissingClientCa),
         None => builder.with_no_client_auth().with_single_cert(certificates, private_key)?,
     };
     crypto.alpn_protocols = vec![b"h3".to_vec()];
@@ -85,3 +92,7 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, TlsError> {
         source => TlsError::Pem { path: path.display().to_string(), source },
     })
 }
+
+#[cfg(test)]
+#[path = "tls_tests.rs"]
+mod tests;

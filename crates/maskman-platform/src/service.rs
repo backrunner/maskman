@@ -1,11 +1,15 @@
 use std::{
-    fs,
+    fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use crate::PlatformError;
+
+const TEMP_FILE_ATTEMPTS: u64 = 32;
+static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceAction {
@@ -93,6 +97,9 @@ pub fn install(spec: &ServiceSpec, dry_run: bool) -> Result<bool, PlatformError>
     }
     write_atomic(&spec.service_path, rendered.as_bytes())?;
     manager_command("install", spec)?;
+    if cfg!(target_os = "linux") {
+        manager_command("enable", spec)?;
+    }
     Ok(true)
 }
 
@@ -106,7 +113,9 @@ pub fn uninstall(spec: &ServiceSpec, dry_run: bool) -> Result<(), PlatformError>
         if spec.service_path.exists() {
             fs::remove_file(&spec.service_path).map_err(PlatformError::ServiceIo)?;
         }
-        manager_command("reload", spec)?;
+        if cfg!(target_os = "linux") {
+            manager_command("daemon-reload", spec)?;
+        }
     }
     Ok(())
 }
@@ -155,13 +164,38 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), PlatformError> {
             "service path has no valid file name",
         ))
     })?;
-    let temporary = parent.join(format!(".{file_name}.tmp-{}", std::process::id()));
-    let mut file = fs::File::create(&temporary).map_err(PlatformError::ServiceIo)?;
-    file.write_all(content).map_err(PlatformError::ServiceIo)?;
-    file.sync_all().map_err(PlatformError::ServiceIo)?;
-    fs::rename(&temporary, path).map_err(PlatformError::ServiceIo)?;
-    set_service_permissions(path)?;
-    Ok(())
+    let (temporary, mut file) = create_temporary(parent, file_name)?;
+    let result = (|| {
+        set_service_permissions(&temporary)?;
+        file.write_all(content).map_err(PlatformError::ServiceIo)?;
+        file.sync_all().map_err(PlatformError::ServiceIo)?;
+        drop(file);
+        fs::rename(&temporary, path).map_err(PlatformError::ServiceIo)?;
+        set_service_permissions(path)?;
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(PlatformError::ServiceIo)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn create_temporary(parent: &Path, file_name: &str) -> Result<(PathBuf, fs::File), PlatformError> {
+    for _ in 0..TEMP_FILE_ATTEMPTS {
+        let sequence = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(".{file_name}.tmp-{}-{sequence}", std::process::id()));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(PlatformError::ServiceIo(error)),
+        }
+    }
+    Err(PlatformError::ServiceIo(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not reserve a unique service temporary file",
+    )))
 }
 
 fn require_absolute(path: &Path, field: &str) -> Result<(), PlatformError> {
@@ -198,7 +232,7 @@ fn render_systemd(spec: &ServiceSpec) -> String {
 fn render_launchd(spec: &ServiceSpec) -> String {
     let log_dir = spec.state_dir.join("logs");
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>top.backrunner.maskman</string>\n  <key>ProgramArguments</key><array><string>{}</string><string>--config</string><string>{}</string><string>serve</string></array>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n  <key>ThrottleInterval</key><integer>2</integer>\n  <key>SoftResourceLimits</key><dict><key>NumberOfFiles</key><integer>65536</integer></dict>\n  <key>HardResourceLimits</key><dict><key>NumberOfFiles</key><integer>65536</integer></dict>\n  <key>StandardOutPath</key><string>{}/stdout.log</string>\n  <key>StandardErrorPath</key><string>{}/stderr.log</string>\n</dict>\n</plist>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>top.backrunner.maskman</string>\n  <key>ProgramArguments</key><array><string>{}</string><string>--config</string><string>{}</string><string>serve</string></array>\n  <key>RunAtLoad</key><false/>\n  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n  <key>ThrottleInterval</key><integer>2</integer>\n  <key>SoftResourceLimits</key><dict><key>NumberOfFiles</key><integer>65536</integer></dict>\n  <key>HardResourceLimits</key><dict><key>NumberOfFiles</key><integer>65536</integer></dict>\n  <key>StandardOutPath</key><string>{}/stdout.log</string>\n  <key>StandardErrorPath</key><string>{}/stderr.log</string>\n</dict>\n</plist>\n",
         xml_escape(&spec.binary),
         xml_escape(&spec.config),
         xml_escape(&log_dir),
@@ -253,8 +287,14 @@ fn systemd_command(action: &str, service_path: &Path) -> Result<Command, Platfor
         "install" => {
             command.args(["daemon-reload", "--quiet"]);
         }
+        "daemon-reload" => {
+            command.args(["daemon-reload", "--quiet"]);
+        }
         "uninstall" => {
             command.args(["disable", "--now", unit]);
+        }
+        "enable" => {
+            command.args(["enable", unit]);
         }
         "reload" => {
             command.args(["reload", unit]);
@@ -385,5 +425,6 @@ mod tests {
         assert!(output
             .contains("<array><string>/usr/local/bin/maskman</string><string>--config</string>"));
         assert!(output.contains("a&amp;b.toml"));
+        assert!(output.contains("<key>RunAtLoad</key><false/>"));
     }
 }

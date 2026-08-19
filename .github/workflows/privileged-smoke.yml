@@ -1,0 +1,19 @@
+name: maskman-privileged-smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  linux-namespace:
+    runs-on: [self-hosted, linux, maskman-net]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: MASKMAN_NETWORK_NAMESPACE=1 MASKMAN_REQUIRE_PRIVILEGED_SMOKE=1 ./scripts/namespace-smoke.sh cargo test --workspace --locked
+
+  macos-arm64-utun:
+    runs-on: [self-hosted, macos, arm64, maskman-utun]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: MASKMAN_PRIVILEGED_SMOKE=1 MASKMAN_REQUIRE_PRIVILEGED_SMOKE=1 ./scripts/macos-arm64-smoke.sh

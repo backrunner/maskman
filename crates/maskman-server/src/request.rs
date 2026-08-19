@@ -60,12 +60,37 @@ pub enum RequestError {
     Address(#[from] capsule::AddressError),
     #[error("invalid HTTP datagram payload: {0}")]
     DatagramPayload(#[from] capsule::DatagramError),
-    #[error("failed to create connected UDP socket: {0}")]
-    Udp(#[source] std::io::Error),
     #[error("invalid CONNECT-IP control capsule: {0}")]
     IpControl(#[from] IpControlError),
     #[error("failed to send QUIC datagram: {0}")]
     Datagram(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProxyError {
+    ConnectionLimitReached,
+    DestinationIpProhibited,
+    DestinationUnavailable,
+    DnsError,
+    HttpRequestDenied,
+    HttpRequestError,
+    ProxyConfigurationError,
+    ProxyInternalError,
+}
+
+impl ProxyError {
+    fn field_value(self) -> &'static str {
+        match self {
+            Self::ConnectionLimitReached => "maskman; error=connection_limit_reached",
+            Self::DestinationIpProhibited => "maskman; error=destination_ip_prohibited",
+            Self::DestinationUnavailable => "maskman; error=destination_unavailable",
+            Self::DnsError => "maskman; error=dns_error",
+            Self::HttpRequestDenied => "maskman; error=http_request_denied",
+            Self::HttpRequestError => "maskman; error=http_request_error",
+            Self::ProxyConfigurationError => "maskman; error=proxy_configuration_error",
+            Self::ProxyInternalError => "maskman; error=proxy_internal_error",
+        }
+    }
 }
 
 pub async fn handle(
@@ -75,7 +100,12 @@ pub async fn handle(
 ) -> Result<(), RequestError> {
     let (request, stream) = resolver.resolve_request().await?;
     if context.is_none() && mode == RequestMode::RejectUntilAuthentication {
-        return reject(stream, StatusCode::SERVICE_UNAVAILABLE, false).await;
+        return reject(
+            stream,
+            StatusCode::SERVICE_UNAVAILABLE,
+            ProxyError::ProxyConfigurationError,
+        )
+        .await;
     }
     if let Some(context) = context {
         return handle_proxy(request, stream, context).await;
@@ -133,9 +163,15 @@ async fn handle_udp(
     mut stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     context: RequestContext,
 ) -> Result<(), RequestError> {
+    if !context.config.udp.enabled {
+        return reject(stream, StatusCode::NOT_IMPLEMENTED, ProxyError::ProxyConfigurationError)
+            .await;
+    }
     let target = match parse_udp_path(request.uri().path(), &context.config.base_path) {
         Ok(target) => target,
-        Err(_) => return reject(stream, StatusCode::BAD_REQUEST, false).await,
+        Err(_) => {
+            return reject(stream, StatusCode::BAD_REQUEST, ProxyError::HttpRequestError).await;
+        }
     };
     let authenticator = Authenticator::new(context.config.clone());
     let principal =
@@ -163,10 +199,11 @@ async fn handle_udp(
         policy.limits.active_tunnels,
         policy.limits.new_tunnels_per_minute,
     ) else {
-        return reject(stream, StatusCode::TOO_MANY_REQUESTS, false).await;
+        return reject(stream, StatusCode::TOO_MANY_REQUESTS, ProxyError::ConnectionLimitReached)
+            .await;
     };
     let stream_id = stream.id().into_inner();
-    let session = udp::start(
+    let session = match udp::start(
         target,
         stream_id,
         context.connection.clone(),
@@ -175,17 +212,28 @@ async fn handle_udp(
         policy.limits.clone(),
     )
     .await
-    .map_err(RequestError::Udp)?;
-    let udp::UdpSession { handle, mut egress, task } = session;
+    {
+        Ok(session) => session,
+        Err(_) => {
+            drop(quota);
+            return reject(stream, StatusCode::BAD_GATEWAY, ProxyError::DestinationUnavailable)
+                .await;
+        }
+    };
+    let udp::UdpSession { handle, mut egress, mut violations, task } = session;
     context.registry.insert(stream_id, handle.clone());
     stream.send_response(response(StatusCode::OK, true)).await.map_err(RequestError::Response)?;
     let result = drive_proxy_stream(
         &mut stream,
         &handle,
         &mut egress,
+        &mut violations,
         context.config.udp.max_payload_bytes as usize,
     )
     .await;
+    if result.is_err() {
+        stream.stop_stream(h3::error::Code::H3_MESSAGE_ERROR);
+    }
     context.registry.remove(stream_id);
     task.abort();
     drop(quota);
@@ -196,6 +244,7 @@ async fn drive_proxy_stream(
     stream: &mut h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     session: &udp::UdpSessionHandle,
     egress: &mut mpsc::Receiver<Bytes>,
+    violations: &mut mpsc::Receiver<usize>,
     max_payload: usize,
 ) -> Result<(), RequestError> {
     let mut decoder = Decoder::new(CapsuleLimits::uniform(MAX_CAPSULE_VALUE_BYTES));
@@ -218,12 +267,22 @@ async fn drive_proxy_stream(
                     return Ok(());
                 }
             },
-            Some(payload) = egress.recv() => {
-                let value = capsule::Capsule { capsule_type: capsule::DATAGRAM_CAPSULE, value: payload.to_vec() };
-                let mut encoded = Vec::with_capacity(payload.len() + 16);
-                capsule::encode(&value, &mut encoded)?;
-                stream.send_data(Bytes::from(encoded)).await.map_err(RequestError::Response)?;
+            payload = egress.recv() => match payload {
+                Some(payload) => {
+                    let value = capsule::Capsule { capsule_type: capsule::DATAGRAM_CAPSULE, value: payload.to_vec() };
+                    let mut encoded = Vec::with_capacity(payload.len() + 16);
+                    capsule::encode(&value, &mut encoded)?;
+                    stream.send_data(Bytes::from(encoded)).await.map_err(RequestError::Response)?;
+                }
+                None => {
+                    stream.stop_sending(h3::error::Code::H3_NO_ERROR);
+                    stream.finish().await.map_err(RequestError::Response)?;
+                    return Ok(());
+                }
             },
+            Some(length) = violations.recv() => return Err(RequestError::DatagramPayload(
+                capsule::DatagramError::UdpPayloadTooLarge { length }
+            )),
             else => return Ok(()),
         }
     }
@@ -239,6 +298,7 @@ fn forward_capsule(
     }
     let datagram =
         capsule::decode_datagram(&capsule.value).map_err(|_| capsule::DecoderError::Truncated)?;
+    capsule::validate_udp_payload(&datagram)?;
     if datagram.context_id != 0 || datagram.payload.len() > max_payload {
         return Ok(());
     }
@@ -260,10 +320,10 @@ fn is_connect_udp(request: &Request<()>) -> bool {
 pub(crate) async fn reject(
     mut stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     status: StatusCode,
-    capsule_protocol: bool,
+    proxy_error: ProxyError,
 ) -> Result<(), RequestError> {
     stream
-        .send_response(response(status, capsule_protocol))
+        .send_response(error_response(status, proxy_error))
         .await
         .map_err(RequestError::Response)?;
     stream.finish().await.map_err(RequestError::Response)
@@ -273,7 +333,7 @@ pub(crate) async fn reject_auth(
     mut stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     _error: AuthError,
 ) -> Result<(), RequestError> {
-    let mut response = response(StatusCode::UNAUTHORIZED, false);
+    let mut response = error_response(StatusCode::UNAUTHORIZED, ProxyError::HttpRequestDenied);
     response
         .headers_mut()
         .insert("www-authenticate", HeaderValue::from_static("Bearer realm=\"maskman\""));
@@ -283,16 +343,26 @@ pub(crate) async fn reject_auth(
 
 pub(crate) async fn reject_policy(
     stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
-    _error: PolicyError,
+    error: PolicyError,
 ) -> Result<(), RequestError> {
-    reject(stream, StatusCode::FORBIDDEN, false).await
+    let proxy_error = match error {
+        PolicyError::Capability => ProxyError::HttpRequestDenied,
+        PolicyError::Destination => ProxyError::DestinationIpProhibited,
+    };
+    reject(stream, StatusCode::FORBIDDEN, proxy_error).await
 }
 
 async fn reject_resolver(
     stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
-    _error: resolver::ResolveError,
+    error: resolver::ResolveError,
 ) -> Result<(), RequestError> {
-    reject(stream, StatusCode::BAD_GATEWAY, false).await
+    let (status, proxy_error) = match error {
+        resolver::ResolveError::Dns => (StatusCode::BAD_GATEWAY, ProxyError::DnsError),
+        resolver::ResolveError::Policy => {
+            (StatusCode::FORBIDDEN, ProxyError::DestinationIpProhibited)
+        }
+    };
+    reject(stream, status, proxy_error).await
 }
 
 pub(crate) fn response(status: StatusCode, capsule_protocol: bool) -> http::Response<()> {
@@ -305,4 +375,29 @@ pub(crate) fn response(status: StatusCode, capsule_protocol: bool) -> http::Resp
     *response.version_mut() = Version::HTTP_3;
     *response.headers_mut() = headers;
     response
+}
+
+fn error_response(status: StatusCode, proxy_error: ProxyError) -> http::Response<()> {
+    let mut response = response(status, false);
+    response
+        .headers_mut()
+        .insert("proxy-status", HeaderValue::from_static(proxy_error.field_value()));
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use http::StatusCode;
+
+    use super::{error_response, ProxyError};
+
+    #[test]
+    fn proxy_status_uses_registered_rfc_9209_error_tokens() {
+        let response = error_response(StatusCode::FORBIDDEN, ProxyError::DestinationIpProhibited);
+        assert_eq!(
+            response.headers().get("proxy-status").and_then(|value| value.to_str().ok()),
+            Some("maskman; error=destination_ip_prohibited")
+        );
+        assert!(response.headers().get("capsule-protocol").is_none());
+    }
 }

@@ -94,7 +94,7 @@ fn build_document(args: &SetupArgs) -> Result<(maskman_config::ConfigDocument, O
     document.auth.principals.push(maskman_config::model::PrincipalConfig {
         id: args.principal_id.clone(),
         roles: vec!["default".into()],
-        certificate_sha256: Vec::new(),
+        certificate_sha256: args.certificate_sha256.clone(),
     });
     let (token, token_config) = generate_token(&args.token_id, &args.principal_id, args.auth_mode)?;
     if let Some(token_config) = token_config {

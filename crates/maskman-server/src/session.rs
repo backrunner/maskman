@@ -87,9 +87,9 @@ impl SessionRegistry {
         self.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&stream_id)
     }
 
-    pub fn try_send(&self, stream_id: u64, payload: Bytes) -> bool {
+    pub fn try_send(&self, stream_id: u64, payload: Bytes) -> Option<bool> {
         let sessions = self.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        sessions.get(&stream_id).is_some_and(|session| session.try_send(payload))
+        sessions.get(&stream_id).map(|session| session.try_send(payload))
     }
 }
 

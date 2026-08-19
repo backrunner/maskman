@@ -1,0 +1,4 @@
+self-hosted-runner:
+  labels:
+    - maskman-net
+    - maskman-utun

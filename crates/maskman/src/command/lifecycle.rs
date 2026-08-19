@@ -131,6 +131,7 @@ pub fn action(name: &str, config: Option<&Path>, args: ActionArgs, output: Outpu
 }
 
 pub async fn cleanup(config: Option<&Path>, args: ActionArgs, output: Output) -> Result<()> {
+    require_confirmation(&args, "clean owned network resources")?;
     let path = config.map(PathBuf::from).unwrap_or_else(maskman_platform::default_config_path);
     let state_dir = if path.exists() {
         maskman_config::compile(&path)
@@ -264,4 +265,23 @@ fn require_confirmation(args: &ActionArgs, action: &str) -> Result<()> {
 
 fn hex_digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::require_confirmation;
+    use crate::cli::ActionArgs;
+
+    #[test]
+    fn destructive_lifecycle_actions_require_confirmation_or_dry_run() {
+        assert!(require_confirmation(
+            &ActionArgs { yes: false, dry_run: false },
+            "clean resources"
+        )
+        .is_err());
+        assert!(require_confirmation(&ActionArgs { yes: true, dry_run: false }, "clean resources")
+            .is_ok());
+        assert!(require_confirmation(&ActionArgs { yes: false, dry_run: true }, "clean resources")
+            .is_ok());
+    }
 }

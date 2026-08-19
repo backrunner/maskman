@@ -1,6 +1,6 @@
 # Maskman 实现方案索引
 
-状态：M0 工程基线、M1 HTTP/3 transport spike、M2 protocol compliance core、M3 认证/CONNECT-UDP 和 M4 CONNECT-IP 核心数据面已实现；特权网络配置、service、CLI 运维和 signed update 仍按里程碑推进
+状态：M0-M3、M6 与 M7 的核心能力已有本地实现和测试；M4/M5 的 CONNECT-IP/session/platform 基础已加入，但 supervisor/worker、managed NAT、macOS route/pf 和真实 TUN 转发仍未完成；M8 本地质量门禁已验证，目标机、长稳和外部互操作证据仍待执行
 调研基线：2026-08-20
 目标：单一 Rust 二进制，作为长期运行的 MASQUE daemon，同时提供安装、配置、生命周期管理和自更新 CLI。
 
@@ -32,6 +32,8 @@
 - [09-protocol-compliance.md](09-protocol-compliance.md)：M2 codec、属性/fuzz/golden 证据和执行门禁结果。
 - [10-auth-and-udp.md](10-auth-and-udp.md)：M3 authentication、policy、DNS 固定解析和 CONNECT-UDP 数据面证据。
 - [11-connect-ip.md](11-connect-ip.md)：M4 CONNECT-IP session、地址池、packet enforcement、TUN 边界和 Linux netlink 证据。
+- [12-m8-evidence.md](12-m8-evidence.md)：M8 benchmark、fuzz、网络/平台 smoke、soak、interop 和发布门禁证据。
+- [13-threat-model.md](13-threat-model.md)：资产、信任边界、滥用路径和剩余 release blocker。
 - [skills/maskman-guard/SKILL.md](skills/maskman-guard/SKILL.md)：后续开发和审查必须使用的工程 guard。
 
 ## v1 完成定义
@@ -46,4 +48,4 @@
 6. 三个发布目标经过原生或受控的跨架构测试，产物有校验和、独立签名、SBOM 和 provenance。
 7. 模糊测试、故障注入、长稳测试、互操作测试和性能回归门槛全部通过。
 
-本目录描述的是实施合同，不代表当前仓库已经具备这些能力。任何发布说明必须以实际通过的合规矩阵为准。
+本目录描述的是实施合同和当前证据，不代表目标机或外部互操作 gate 已通过。任何发布说明必须以实际通过的合规矩阵和 release checklist 为准。

@@ -54,6 +54,10 @@ pub enum ValidationError {
     TokenHash { token: String },
     #[error("principal {principal} has an invalid certificate SHA-256 value")]
     CertificateHash { principal: String },
+    #[error("mTLS authentication requires tls.client_ca_file")]
+    MissingClientCa,
+    #[error("mTLS authentication requires at least one principal certificate SHA-256 mapping")]
+    MissingCertificatePrincipal,
     #[error("bearer token {token} has an invalid expiry: {value}")]
     TokenExpiry { token: String, value: String },
     #[error("role {role} contains unsupported capability {capability}")]
@@ -66,6 +70,8 @@ pub enum ValidationError {
     IpProtocol { role: String, value: String },
     #[error("proxy.udp.max_payload_bytes must be between 1 and 65527")]
     UdpPayload,
+    #[error("proxy.udp.socket_idle_timeout must be at least 2m when CONNECT-UDP is enabled")]
+    UdpIdleTimeout,
     #[error("proxy.ip.mtu must be at least 1280 for IPv6-capable IP proxying")]
     IpMtu,
     #[error("proxy.ip pool {field} is invalid: {value}")]
@@ -126,12 +132,7 @@ pub fn validate(document: &ConfigDocument) -> Result<(), ValidationError> {
     }
     validate_auth(document)?;
     validate_policy(document)?;
-    if document.proxy.udp.enabled
-        && (document.proxy.udp.max_payload_bytes == 0
-            || document.proxy.udp.max_payload_bytes > 65_527)
-    {
-        return Err(ValidationError::UdpPayload);
-    }
+    validate_udp(document)?;
     validate_ip(document)?;
     document.observability.metrics_listen.parse::<SocketAddr>().map_err(|_| {
         ValidationError::MetricsListen(document.observability.metrics_listen.clone())
@@ -209,6 +210,36 @@ fn validate_auth(document: &ConfigDocument) -> Result<(), ValidationError> {
     }
     if document.auth.required && matches!(document.auth.mode, AuthMode::None) {
         return Err(ValidationError::EmptyField("auth.mode when auth.required is true"));
+    }
+    validate_mtls(document)
+}
+
+fn validate_mtls(document: &ConfigDocument) -> Result<(), ValidationError> {
+    let uses_mtls = matches!(document.auth.mode, AuthMode::Mtls | AuthMode::BearerOrMtls);
+    if uses_mtls
+        && document.tls.client_ca_file.as_deref().is_none_or(|value| value.trim().is_empty())
+    {
+        return Err(ValidationError::MissingClientCa);
+    }
+    if uses_mtls
+        && document.auth.principals.iter().all(|principal| principal.certificate_sha256.is_empty())
+    {
+        return Err(ValidationError::MissingCertificatePrincipal);
+    }
+    Ok(())
+}
+
+fn validate_udp(document: &ConfigDocument) -> Result<(), ValidationError> {
+    if !document.proxy.udp.enabled {
+        return Ok(());
+    }
+    if parse_duration(&document.proxy.udp.socket_idle_timeout)
+        .is_ok_and(|duration| duration < std::time::Duration::from_secs(120))
+    {
+        return Err(ValidationError::UdpIdleTimeout);
+    }
+    if document.proxy.udp.max_payload_bytes == 0 || document.proxy.udp.max_payload_bytes > 65_527 {
+        return Err(ValidationError::UdpPayload);
     }
     Ok(())
 }

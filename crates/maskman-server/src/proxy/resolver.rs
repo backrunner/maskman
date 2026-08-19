@@ -35,7 +35,7 @@ pub async fn resolve_udp_target(
                 .take(32)
                 .filter(|address| policy.authorize_destination(address.ip()).is_ok())
                 .collect::<Vec<_>>();
-            allowed.sort_by_key(|address| !(address.is_ipv6() == prefer_ipv6));
+            allowed.sort_by_key(|address| address.is_ipv6() != prefer_ipv6);
             allowed.into_iter().next().ok_or(ResolveError::Policy)
         }
     }

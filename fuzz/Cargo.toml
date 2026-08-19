@@ -9,7 +9,10 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+maskman-config = { path = "../crates/maskman-config" }
 maskman-protocol = { path = "../crates/maskman-protocol" }
+serde_json = "1"
+toml = "0.8"
 
 [[bin]]
 name = "capsule_decoder"
@@ -49,6 +52,20 @@ bench = false
 [[bin]]
 name = "route_advertisement"
 path = "fuzz_targets/route_advertisement.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_toml"
+path = "fuzz_targets/config_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_json"
+path = "fuzz_targets/config_json.rs"
 test = false
 doc = false
 bench = false

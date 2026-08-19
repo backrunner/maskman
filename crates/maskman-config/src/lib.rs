@@ -64,7 +64,9 @@ pub fn compile_document(
 
 #[cfg(test)]
 mod tests {
-    use super::{load, model::ConfigDocument, render, validate, write_atomic, ConfigFormat};
+    use super::{
+        load, model::ConfigDocument, render, validate, write_atomic, AuthMode, ConfigFormat,
+    };
 
     #[test]
     fn default_config_round_trips_as_toml() {
@@ -112,5 +114,29 @@ mod tests {
         assert_eq!(toml_loaded.schema_version, 1);
         assert_eq!(json_loaded.schema_version, 1);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mtls_requires_a_ca_and_certificate_principal() {
+        for mode in [AuthMode::Mtls, AuthMode::BearerOrMtls] {
+            let mut document = ConfigDocument::default();
+            document.auth.mode = mode;
+            assert!(matches!(validate(&document), Err(validate::ValidationError::MissingClientCa)));
+            document.tls.client_ca_file = Some("client-ca.pem".into());
+            assert!(matches!(
+                validate(&document),
+                Err(validate::ValidationError::MissingCertificatePrincipal)
+            ));
+        }
+    }
+
+    #[test]
+    fn enabled_udp_rejects_idle_timeouts_below_rfc_9298_guidance() {
+        let mut document = ConfigDocument::default();
+        document.proxy.udp.enabled = true;
+        document.proxy.udp.socket_idle_timeout = "119s".into();
+        assert!(matches!(validate(&document), Err(validate::ValidationError::UdpIdleTimeout)));
+        document.proxy.udp.socket_idle_timeout = "2m".into();
+        assert!(validate(&document).is_ok());
     }
 }

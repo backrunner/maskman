@@ -83,8 +83,10 @@ impl AddressPool {
             return None;
         }
         let span = self.last - self.first + 1;
-        let scan_limit = span.min(4096);
-        for _ in 0..scan_limit {
+        if self.leased.len() as u128 >= span {
+            return None;
+        }
+        loop {
             let candidate = self.next;
             self.next = if candidate == self.last { self.first } else { candidate + 1 };
             let address = address_from_numeric(self.network, candidate);
@@ -92,7 +94,6 @@ impl AddressPool {
                 return Some((address, host_prefix(address)));
             }
         }
-        None
     }
 
     fn release(&mut self, address: IpAddr) {
@@ -141,7 +142,7 @@ fn address_from_numeric(network: IpNet, value: u128) -> IpAddr {
 
 #[cfg(test)]
 mod tests {
-    use super::AddressPoolSet;
+    use super::{AddressPool, AddressPoolSet};
 
     #[test]
     fn leases_are_unique_and_released() {
@@ -168,5 +169,18 @@ mod tests {
         drop(first);
         let third = pools.lease().unwrap_or_else(|| panic!("reused lease"));
         assert_eq!(third.prefixes().next().map(|prefix| prefix.network()), Some(first_address));
+    }
+
+    #[test]
+    fn large_pool_scans_past_long_occupied_run() {
+        let network = "198.18.0.0/19".parse().unwrap_or_else(|error| panic!("parse pool: {error}"));
+        let mut pool = AddressPool::new(network);
+        for _ in 0..5_000 {
+            pool.lease().unwrap_or_else(|| panic!("populate address pool"));
+        }
+        pool.next = pool.first;
+
+        let (address, _) = pool.lease().unwrap_or_else(|| panic!("lease after occupied run"));
+        assert_eq!(super::numeric(address), pool.first + 5_000);
     }
 }

@@ -95,6 +95,36 @@ source = ["crates/maskman-protocol/src/capsule/datagram.rs"]
 tests = ["crates/maskman-protocol/tests/compliance.rs::rfc9298_context_zero_payload_limit"]
 
 [[requirement]]
+id = "RFC9298-5-UDP-OVERSIZE-STREAM"
+rfc = 9298
+section = "5"
+level = "MUST"
+summary = "A context zero UDP payload larger than 65527 bytes terminates the request stream"
+status = "implemented"
+source = ["crates/maskman-server/src/request.rs", "crates/maskman-server/src/proxy/udp.rs"]
+tests = ["crates/maskman-server/src/udp_transport_tests.rs::oversized_udp_capsule_aborts_the_request_stream"]
+
+[[requirement]]
+id = "MASKMAN-M3-UDP-IDLE-LIFECYCLE"
+rfc = 9298
+section = "3.1"
+level = "MUST"
+summary = "The connected UDP socket and request stream close together after bounded inactivity"
+status = "implemented"
+source = ["crates/maskman-server/src/request.rs", "crates/maskman-server/src/proxy/udp.rs"]
+tests = ["crates/maskman-server/src/udp_transport_tests.rs::udp_idle_timeout_closes_the_request_stream"]
+
+[[requirement]]
+id = "RFC9209-2-PROXY-STATUS"
+rfc = 9209
+section = "2"
+level = "MUST"
+summary = "Proxy failures use a syntactically valid Proxy-Status field with registered error tokens"
+status = "implemented"
+source = ["crates/maskman-server/src/request.rs"]
+tests = ["crates/maskman-server/src/request.rs::proxy_status_uses_registered_rfc_9209_error_tokens", "crates/maskman-server/src/udp_transport_tests.rs::disabled_connect_udp_returns_proxy_configuration_error"]
+
+[[requirement]]
 id = "RFC9484-4.6-WILDCARD-ESCAPE"
 rfc = 9484
 section = "4.6"
@@ -153,6 +183,26 @@ summary = "ADDRESS_REQUEST IDs are nonzero and unique within the request capsule
 status = "implemented"
 source = ["crates/maskman-protocol/src/capsule/address.rs"]
 tests = ["crates/maskman-protocol/src/capsule/address.rs::request_requires_nonzero_unique_ids_and_aligned_prefixes"]
+
+[[requirement]]
+id = "RFC9484-4.7.2-REQUEST-RESPONSE"
+rfc = 9484
+section = "4.7.2"
+level = "MUST"
+summary = "ADDRESS_REQUEST responses preserve request IDs and select an assignment of the requested address family"
+status = "implemented"
+source = ["crates/maskman-server/src/proxy/ip.rs"]
+tests = ["crates/maskman-server/src/proxy/ip_tests.rs::address_requests_match_family_and_preserve_complete_assignment_set"]
+
+[[requirement]]
+id = "RFC9484-4.7.1-ASSIGN-COMPLETE"
+rfc = 9484
+section = "4.7.1"
+level = "MUST"
+summary = "Every ADDRESS_ASSIGN response carries the current complete assignment set"
+status = "implemented"
+source = ["crates/maskman-server/src/proxy/ip.rs"]
+tests = ["crates/maskman-server/src/proxy/ip_tests.rs::address_requests_match_family_and_preserve_complete_assignment_set", "crates/maskman-server/src/proxy/ip_tests.rs::initial_assignment_uses_unprompted_request_id_zero"]
 
 [[requirement]]
 id = "RFC9484-4.7.3-ROUTE-FIELDS"
@@ -273,7 +323,7 @@ level = "MUST"
 summary = "Outbound IP packets must use an address assigned to the CONNECT-IP session"
 status = "implemented"
 source = ["crates/maskman-server/src/proxy/ip.rs"]
-tests = ["crates/maskman-server/src/proxy/ip.rs::source_and_protocol_are_enforced"]
+tests = ["crates/maskman-server/src/proxy/ip_tests.rs::source_and_protocol_are_enforced"]
 
 [[requirement]]
 id = "RFC9484-6-PACKET-SCOPE"
@@ -283,7 +333,7 @@ level = "MUST"
 summary = "IP packet destination and protocol are checked against URI and principal scope"
 status = "implemented"
 source = ["crates/maskman-server/src/proxy/ip.rs", "crates/maskman-server/src/policy.rs"]
-tests = ["crates/maskman-server/src/proxy/ip.rs::source_and_protocol_are_enforced"]
+tests = ["crates/maskman-server/src/proxy/ip_tests.rs::source_and_protocol_are_enforced"]
 
 [[requirement]]
 id = "RFC9484-6-HOP-LIMIT"

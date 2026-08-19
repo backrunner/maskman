@@ -26,7 +26,7 @@ impl UpdateClient {
         let repository = validate_repository(repository)?;
         let current_version = Version::parse(current_version)
             .map_err(|_| UpdateError::InvalidVersion(current_version.into()))?;
-        let key = decode_public_key(crate::RELEASE_PUBLIC_KEY_HEX)?;
+        let key = release_key(crate::RELEASE_PUBLIC_KEY_HEX)?;
         let http = reqwest::blocking::Client::builder()
             .user_agent(format!("maskman/{current_version}"))
             .timeout(std::time::Duration::from_secs(20))
@@ -110,6 +110,14 @@ impl UpdateClient {
     }
 }
 
+fn release_key(value: Option<&str>) -> Result<ed25519_dalek::VerifyingKey, UpdateError> {
+    let value = value.ok_or(UpdateError::ReleaseKeyUnavailable)?;
+    if value.eq_ignore_ascii_case(crate::INSECURE_TEST_PUBLIC_KEY_HEX) {
+        return Err(UpdateError::InsecureReleaseKey);
+    }
+    decode_public_key(value)
+}
+
 fn release_info(
     release: &GithubRelease,
     target: &str,
@@ -169,4 +177,19 @@ struct GithubRelease {
 struct GithubAsset {
     name: String,
     browser_download_url: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::release_key;
+    use crate::{UpdateError, INSECURE_TEST_PUBLIC_KEY_HEX};
+
+    #[test]
+    fn release_key_fails_closed_without_a_production_trust_anchor() {
+        assert!(matches!(release_key(None), Err(UpdateError::ReleaseKeyUnavailable)));
+        assert!(matches!(
+            release_key(Some(INSECURE_TEST_PUBLIC_KEY_HEX)),
+            Err(UpdateError::InsecureReleaseKey)
+        ));
+    }
 }

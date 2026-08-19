@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use tappers::{Interface, Tun};
 use tokio::io::unix::AsyncFd;
+use tun_rs::{DeviceBuilder, Layer, SyncDevice};
 
 use crate::{JournalEntry, NetworkJournal, PlatformError};
 
@@ -12,7 +12,7 @@ pub struct TunConfig {
 }
 
 pub struct TunDevice {
-    device: Arc<AsyncFd<Tun>>,
+    device: Arc<AsyncFd<SyncDevice>>,
     name: String,
     mtu: u16,
 }
@@ -20,22 +20,14 @@ pub struct TunDevice {
 impl TunDevice {
     pub fn create(config: TunConfig, journal: &mut NetworkJournal) -> Result<Self, PlatformError> {
         validate(&config)?;
-        let requested = Interface::new(&config.name).map_err(PlatformError::TunIo)?;
-        let create_unnamed = cfg!(target_os = "macos") && !config.name.starts_with("utun");
-        if !create_unnamed && requested.exists().map_err(PlatformError::TunIo)? {
-            return Err(PlatformError::InvalidTun(format!(
-                "interface {} already exists; cleanup its owned journal entry first",
-                config.name
-            )));
+        let mut builder =
+            DeviceBuilder::new().mtu(config.mtu).layer(Layer::L3).packet_information(false);
+        if cfg!(target_os = "linux") || config.name.starts_with("utun") {
+            builder = builder.name(&config.name);
         }
-        let mut device = if create_unnamed {
-            Tun::new().map_err(PlatformError::TunIo)?
-        } else {
-            Tun::new_named(requested).map_err(PlatformError::TunIo)?
-        };
+        let device = builder.build_sync().map_err(PlatformError::TunIo)?;
         device.set_nonblocking(true).map_err(PlatformError::TunIo)?;
-        let actual_name =
-            device.name().map_err(PlatformError::TunIo)?.name().to_string_lossy().into_owned();
+        let actual_name = device.name().map_err(PlatformError::TunIo)?;
         journal.record(JournalEntry::Tun { name: actual_name.clone() });
         let device = AsyncFd::new(device).map_err(PlatformError::TunIo)?;
         Ok(Self { device: Arc::new(device), name: actual_name, mtu: config.mtu })
@@ -50,12 +42,7 @@ impl TunDevice {
     }
 
     pub fn interface_index(&self) -> Result<u32, PlatformError> {
-        self.device
-            .get_ref()
-            .name()
-            .map_err(PlatformError::TunIo)?
-            .index()
-            .map_err(PlatformError::TunIo)
+        self.device.get_ref().if_index().map_err(PlatformError::TunIo)
     }
 
     pub async fn recv(&self, packet: &mut [u8]) -> Result<usize, PlatformError> {

@@ -67,7 +67,9 @@ pub struct SetupArgs {
     pub private_key_file: Option<String>,
     #[arg(long)]
     pub client_ca_file: Option<String>,
-    #[arg(long, value_enum, default_value_t = AuthModeArg::BearerOrMtls)]
+    #[arg(long = "certificate-sha256", value_name = "HEX")]
+    pub certificate_sha256: Vec<String>,
+    #[arg(long, value_enum, default_value_t = AuthModeArg::Bearer)]
     pub auth_mode: AuthModeArg,
     #[arg(long, default_value = "admin")]
     pub principal_id: String,

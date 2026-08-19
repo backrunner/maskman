@@ -1,4 +1,9 @@
-use std::{fs, io::Write, path::Path};
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +13,8 @@ use crate::PlatformError;
 use ipnet::IpNet;
 
 const JOURNAL_VERSION: u32 = 1;
+const TEMP_FILE_ATTEMPTS: u64 = 32;
+static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -57,15 +64,23 @@ impl NetworkJournal {
                 "journal path has no valid file name",
             ))
         })?;
-        let temporary = parent.join(format!(".{file_name}.tmp-{}", std::process::id()));
-        let mut file = fs::File::create(&temporary).map_err(PlatformError::Journal)?;
         let encoded = serde_json::to_vec_pretty(self).map_err(|error| {
             PlatformError::Journal(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
         })?;
-        file.write_all(&encoded).map_err(PlatformError::Journal)?;
-        file.sync_all().map_err(PlatformError::Journal)?;
-        fs::rename(&temporary, path).map_err(PlatformError::Journal)?;
-        set_private_permissions(path)
+        let (temporary, mut file) = create_temporary(parent, file_name)?;
+        let result = (|| {
+            set_private_permissions(&temporary)?;
+            file.write_all(&encoded).map_err(PlatformError::Journal)?;
+            file.sync_all().map_err(PlatformError::Journal)?;
+            drop(file);
+            fs::rename(&temporary, path).map_err(PlatformError::Journal)?;
+            set_private_permissions(path)?;
+            sync_directory(parent)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
     }
 
     pub fn remove(path: &Path) -> Result<(), PlatformError> {
@@ -103,6 +118,26 @@ fn journal_version() -> u32 {
     JOURNAL_VERSION
 }
 
+fn create_temporary(parent: &Path, file_name: &str) -> Result<(PathBuf, fs::File), PlatformError> {
+    for _ in 0..TEMP_FILE_ATTEMPTS {
+        let sequence = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(".{file_name}.tmp-{}-{sequence}", std::process::id()));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(PlatformError::Journal(error)),
+        }
+    }
+    Err(PlatformError::Journal(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not reserve a unique journal temporary file",
+    )))
+}
+
+fn sync_directory(path: &Path) -> Result<(), PlatformError> {
+    fs::File::open(path).and_then(|directory| directory.sync_all()).map_err(PlatformError::Journal)
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CleanupReport {
     pub inspected: usize,
@@ -118,7 +153,7 @@ pub async fn cleanup(path: &Path, dry_run: bool) -> Result<CleanupReport, Platfo
     let mut removed = 0;
     for entry in journal.drain_reverse() {
         match entry {
-            JournalEntry::Tun { name } => cleanup_tun(&name)?,
+            JournalEntry::Tun { name } => cleanup_tun(&name).await?,
             JournalEntry::Route { destination, interface_index } => {
                 #[cfg(target_os = "linux")]
                 {
@@ -146,14 +181,25 @@ pub async fn cleanup(path: &Path, dry_run: bool) -> Result<CleanupReport, Platfo
     Ok(CleanupReport { inspected: report.inspected, removed })
 }
 
-fn cleanup_tun(name: &str) -> Result<(), PlatformError> {
-    let interface = tappers::Interface::new(name).map_err(PlatformError::TunIo)?;
-    if !interface.exists().map_err(PlatformError::TunIo)? {
-        return Ok(());
+async fn cleanup_tun(name: &str) -> Result<(), PlatformError> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::LinuxRouteManager::remove_tun(name).await
     }
-    let device = tappers::Tun::new_named(interface).map_err(PlatformError::TunIo)?;
-    drop(device);
-    Ok(())
+
+    #[cfg(target_os = "macos")]
+    {
+        // utun devices are bound to the owning file descriptor and disappear
+        // when that descriptor closes. Re-opening a name here could attach to
+        // an unrelated device, so cleanup is deliberately non-creating.
+        let _ = name;
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        Err(PlatformError::UnsupportedCleanup(format!("tun device {name}")))
+    }
 }
 
 #[cfg(unix)]
@@ -171,7 +217,7 @@ fn set_private_permissions(_path: &Path) -> Result<(), PlatformError> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{JournalEntry, NetworkJournal};
+    use super::{create_temporary, JournalEntry, NetworkJournal};
 
     #[test]
     fn journal_drains_owned_resources_in_reverse_order() {
@@ -195,5 +241,19 @@ mod tests {
         assert_eq!(loaded.entries(), journal.entries());
         NetworkJournal::remove(&path).unwrap_or_else(|error| panic!("remove journal: {error}"));
         assert!(!PathBuf::from(&path).exists());
+    }
+
+    #[test]
+    fn concurrent_temporary_files_are_exclusive() {
+        let root =
+            std::env::temp_dir().join(format!("maskman-journal-temporary-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap_or_else(|error| panic!("create temp root: {error}"));
+        let (first, first_file) = create_temporary(&root, "journal.json")
+            .unwrap_or_else(|error| panic!("reserve first temp: {error}"));
+        let (second, second_file) = create_temporary(&root, "journal.json")
+            .unwrap_or_else(|error| panic!("reserve second temp: {error}"));
+        assert_ne!(first, second);
+        drop((first_file, second_file));
+        std::fs::remove_dir_all(root).unwrap_or_else(|error| panic!("remove temp root: {error}"));
     }
 }

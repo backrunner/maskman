@@ -25,14 +25,31 @@ pub async fn handle(
     context: RequestContext,
 ) -> Result<(), RequestError> {
     if !is_connect_ip(&request) {
-        return request::reject(stream, StatusCode::BAD_REQUEST, false).await;
+        return request::reject(
+            stream,
+            StatusCode::BAD_REQUEST,
+            request::ProxyError::HttpRequestError,
+        )
+        .await;
     }
     if !context.config.ip.enabled {
-        return request::reject(stream, StatusCode::NOT_IMPLEMENTED, false).await;
+        return request::reject(
+            stream,
+            StatusCode::NOT_IMPLEMENTED,
+            request::ProxyError::ProxyConfigurationError,
+        )
+        .await;
     }
     let scope = match parse_ip_path(request.uri().path(), &context.config.base_path) {
         Ok(scope) => scope,
-        Err(_) => return request::reject(stream, StatusCode::BAD_REQUEST, false).await,
+        Err(_) => {
+            return request::reject(
+                stream,
+                StatusCode::BAD_REQUEST,
+                request::ProxyError::HttpRequestError,
+            )
+            .await;
+        }
     };
     let authenticator = Authenticator::new(context.config.clone());
     let principal =
@@ -46,7 +63,12 @@ pub async fn handle(
     }
     if let IpProtocolScope::Number(protocol) = scope.protocol {
         if policy.authorize_ip_protocol(protocol).is_err() {
-            return request::reject(stream, StatusCode::FORBIDDEN, false).await;
+            return request::reject(
+                stream,
+                StatusCode::FORBIDDEN,
+                request::ProxyError::HttpRequestDenied,
+            )
+            .await;
         }
     }
     let Some(quota) = QuotaState::acquire(
@@ -55,7 +77,12 @@ pub async fn handle(
         policy.limits.active_tunnels,
         policy.limits.new_tunnels_per_minute,
     ) else {
-        return request::reject(stream, StatusCode::TOO_MANY_REQUESTS, false).await;
+        return request::reject(
+            stream,
+            StatusCode::TOO_MANY_REQUESTS,
+            request::ProxyError::ConnectionLimitReached,
+        )
+        .await;
     };
     let policy = Arc::new(policy);
     let Some(mut session) = ip::IpSession::start(
@@ -66,15 +93,25 @@ pub async fn handle(
         context.tun_sender.clone(),
     ) else {
         drop(quota);
-        return request::reject(stream, StatusCode::SERVICE_UNAVAILABLE, false).await;
+        return request::reject(
+            stream,
+            StatusCode::SERVICE_UNAVAILABLE,
+            request::ProxyError::ConnectionLimitReached,
+        )
+        .await;
     };
     let stream_id = stream.id().into_inner();
     if !context.ip_registry.insert(context.connection_id, stream_id, session.handle.clone()) {
         drop(quota);
-        return request::reject(stream, StatusCode::SERVICE_UNAVAILABLE, false).await;
+        return request::reject(
+            stream,
+            StatusCode::SERVICE_UNAVAILABLE,
+            request::ProxyError::ProxyInternalError,
+        )
+        .await;
     }
     let result = async {
-        let assigned = session.handle.assignment_capsule([0])?;
+        let assigned = session.handle.initial_assignment_capsule()?;
         stream
             .send_response(request::response(StatusCode::OK, true))
             .await
@@ -93,6 +130,9 @@ pub async fn handle(
         .await
     }
     .await;
+    if result.is_err() {
+        stream.stop_stream(h3::error::Code::H3_MESSAGE_ERROR);
+    }
     context.ip_registry.remove(context.connection_id, stream_id);
     drop(session);
     drop(quota);
@@ -141,22 +181,22 @@ async fn handle_capsule(
 ) -> Result<(), RequestError> {
     match capsule.capsule_type {
         capsule::DATAGRAM_CAPSULE => {
-            if let Ok(datagram) = capsule::decode_datagram(&capsule.value) {
-                if datagram.context_id == 0 {
-                    let _ = session.try_send(Bytes::copy_from_slice(datagram.payload));
-                }
+            let datagram = capsule::decode_datagram(&capsule.value)?;
+            if datagram.context_id == 0 {
+                let _ = session.try_send(Bytes::copy_from_slice(datagram.payload));
             }
         }
         capsule::ADDRESS_REQUEST_CAPSULE => {
             let requests = capsule::decode_address_request(&capsule.value)?;
-            let assignment =
-                session.assignment_capsule(requests.iter().map(|request| request.request_id))?;
+            let assignment = session.address_request_capsule(&requests)?;
             send_capsule(stream, capsule::ADDRESS_ASSIGN_CAPSULE, assignment).await?;
         }
         capsule::ROUTE_ADVERTISEMENT_CAPSULE => {
             session.replace_routes(&capsule.value)?;
         }
-        capsule::ADDRESS_ASSIGN_CAPSULE => {}
+        capsule::ADDRESS_ASSIGN_CAPSULE => {
+            let _ = capsule::decode_address_assign(&capsule.value)?;
+        }
         _ => {}
     }
     Ok(())

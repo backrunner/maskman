@@ -2,6 +2,7 @@
 /.cargo/*
 !/.cargo/config.toml
 fuzz/target/
+fuzz/artifacts/
 *.swp
 *.tmp
 .DS_Store

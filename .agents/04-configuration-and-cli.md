@@ -53,7 +53,8 @@ mode = "bearer-or-mtls"
 [[auth.principals]]
 id = "admin"
 roles = ["default"]
-certificate_sha256 = []
+# Replace this placeholder with the SHA-256 digest of an allowed client certificate.
+certificate_sha256 = ["0000000000000000000000000000000000000000000000000000000000000000"]
 
 [[auth.bearer_tokens]]
 id = "tok_01"

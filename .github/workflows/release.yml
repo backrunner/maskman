@@ -1,0 +1,156 @@
+name: maskman-release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  CARGO_TERM_COLOR: always
+  MASKMAN_RELEASE_PUBLIC_KEY_HEX: ${{ vars.MASKMAN_RELEASE_PUBLIC_KEY_HEX }}
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: Validate tag and production key
+        env:
+          RELEASE_PRIVATE_KEY_PEM_B64: ${{ secrets.MASKMAN_RELEASE_PRIVATE_KEY_PEM_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          workspace_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          test "$version" = "$workspace_version"
+          test "${#MASKMAN_RELEASE_PUBLIC_KEY_HEX}" -eq 64
+          case "$MASKMAN_RELEASE_PUBLIC_KEY_HEX" in
+            *[!0-9a-fA-F]*) exit 1 ;;
+          esac
+          test "$MASKMAN_RELEASE_PUBLIC_KEY_HEX" != "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+          test -n "$RELEASE_PRIVATE_KEY_PEM_B64"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  quality:
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace --locked
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny check
+      - uses: taiki-e/install-action@cargo-audit
+      - run: cargo audit
+      - uses: taiki-e/install-action@cargo-machete
+      - run: cargo machete
+      - run: cargo run --locked -p xtask -- compliance
+      - run: cargo run --locked -p xtask -- benchmark --iterations 100000
+
+  build:
+    needs: [preflight, quality]
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - aarch64-apple-darwin
+    runs-on: ${{ matrix.target == 'aarch64-apple-darwin' && 'macos-14' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          targets: ${{ matrix.target }}
+      - name: Setup Zig
+        if: matrix.target != 'aarch64-apple-darwin'
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.14.1
+      - name: Install cargo-zigbuild
+        if: matrix.target != 'aarch64-apple-darwin'
+        uses: taiki-e/install-action@cargo-zigbuild
+      - name: Build locked release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
+            cargo build --release --locked --target "${{ matrix.target }}"
+          else
+            cargo zigbuild --release --locked --target "${{ matrix.target }}"
+          fi
+      - name: Package update archive and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.preflight.outputs.version }}"
+          target="${{ matrix.target }}"
+          archive="maskman-${version}-${target}.tar.gz"
+          mkdir -p dist
+          tar -C "target/${target}/release" -czf "dist/${archive}" maskman
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist && sha256sum "$archive" > "${archive}.sha256")
+          else
+            (cd dist && shasum -a 256 "$archive" > "${archive}.sha256")
+          fi
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: target/${{ matrix.target }}/release/maskman
+          format: spdx-json
+          output-file: dist/maskman-${{ needs.preflight.outputs.version }}-${{ matrix.target }}.spdx.json
+          upload-artifact: false
+      - name: Attest archive provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/maskman-${{ needs.preflight.outputs.version }}-${{ matrix.target }}.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  sign-and-draft:
+    needs: [preflight, quality, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Sign and independently verify archives
+        env:
+          PRIVATE_KEY_PEM_B64: ${{ secrets.MASKMAN_RELEASE_PRIVATE_KEY_PEM_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$PRIVATE_KEY_PEM_B64" | base64 --decode > release-key.pem
+          openssl pkey -in release-key.pem -pubout -out release-key.pub.pem
+          derived="$(openssl pkey -in release-key.pem -pubout -outform DER | tail -c 32 | xxd -p -c 64)"
+          test "$derived" = "${MASKMAN_RELEASE_PUBLIC_KEY_HEX,,}"
+          for archive in dist/*.tar.gz; do
+            openssl pkeyutl -sign -rawin -inkey release-key.pem -in "$archive" -out "${archive}.sig"
+            openssl pkeyutl -verify -rawin -pubin -inkey release-key.pub.pem -in "$archive" -sigfile "${archive}.sig"
+          done
+          rm -f release-key.pem release-key.pub.pem
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" --draft --verify-tag --title "Maskman ${GITHUB_REF_NAME}" dist/*

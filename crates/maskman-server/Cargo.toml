@@ -21,7 +21,7 @@ sha2 = "0.10"
 subtle = "2.6"
 time = { version = "0.3", features = ["formatting", "macros", "parsing", "serde"] }
 thiserror = "2.0"
-tokio = { version = "1.47", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.47", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
 rcgen = "0.13"

@@ -10,8 +10,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ComplianceError {
-    #[error("usage: cargo xtask compliance [--check-only]")]
-    Usage,
     #[error("failed to read compliance matrix {path}: {source}")]
     Read { path: PathBuf, source: std::io::Error },
     #[error("failed to parse compliance matrix {path}: {source}")]

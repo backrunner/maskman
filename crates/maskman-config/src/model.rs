@@ -98,9 +98,9 @@ impl Default for TlsConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AuthMode {
+    #[default]
     Bearer,
     Mtls,
-    #[default]
     BearerOrMtls,
     None,
 }

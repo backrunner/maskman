@@ -246,8 +246,14 @@ pub fn server_config_with_client_ca(
     certificate_file: &std::path::Path,
     private_key_file: &std::path::Path,
     client_ca_file: Option<&std::path::Path>,
+    require_client_certificate: bool,
 ) -> Result<quinn::ServerConfig, TransportError> {
-    Ok(tls::load_server_config_with_client_ca(certificate_file, private_key_file, client_ca_file)?)
+    Ok(tls::load_server_config_with_client_ca(
+        certificate_file,
+        private_key_file,
+        client_ca_file,
+        require_client_certificate,
+    )?)
 }
 
 async fn handle_connection(
@@ -333,7 +339,6 @@ async fn drive_connection(
                         connection_id.unwrap_or_default(),
                         datagram.stream_id,
                         datagram.payload,
-                        65_527,
                     );
                 } else if mode == TransportMode::EchoDatagrams {
                     let encoded = datagram::encode(datagram.stream_id, datagram.payload)
@@ -353,16 +358,15 @@ fn forward_datagram(
     connection_id: u64,
     stream_id: u64,
     payload: Bytes,
-    max_payload: usize,
 ) {
     let Ok(datagram) = maskman_protocol::capsule::decode_datagram(&payload) else {
         return;
     };
-    if datagram.context_id != 0 || datagram.payload.len() > max_payload {
+    if datagram.context_id != 0 {
         return;
     }
     let payload = Bytes::copy_from_slice(datagram.payload);
-    if !registry.try_send(stream_id, payload.clone()) {
+    if registry.try_send(stream_id, payload.clone()).is_none() {
         if let Some(ip_registry) = ip_registry {
             let _ = ip_registry.try_send(connection_id, stream_id, payload);
         }

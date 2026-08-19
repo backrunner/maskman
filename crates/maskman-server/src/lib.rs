@@ -30,6 +30,8 @@ pub enum ServerError {
     Transport(String),
     #[error("server transport task failed: {0}")]
     Task(String),
+    #[error("failed to install shutdown signal handler: {0}")]
+    Signal(String),
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +60,7 @@ pub async fn serve(config: CompiledConfig) -> Result<(), ServerError> {
         &config.certificate_file,
         &config.private_key_file,
         config.client_ca_file.as_deref(),
+        matches!(&config.auth_mode, maskman_config::AuthMode::Mtls),
     )
     .map_err(|error| ServerError::Transport(error.to_string()))?;
     let limits = TransportLimits {
@@ -204,15 +207,56 @@ async fn provision_routes(
 }
 
 async fn run_servers(servers: Vec<TransportServer>) -> Result<(), ServerError> {
+    let shutdown = servers.iter().map(TransportServer::shutdown_handle).collect::<Vec<_>>();
     let mut tasks = JoinSet::new();
     for server in servers {
         tasks.spawn(server.run());
     }
-    let result = tasks.join_next().await.ok_or(ServerError::MissingListener)?;
-    tasks.abort_all();
+    tokio::select! {
+        result = tasks.join_next() => {
+            tasks.abort_all();
+            map_server_result(result.ok_or(ServerError::MissingListener)?)
+        }
+        signal = shutdown_signal() => {
+            signal?;
+            for handle in shutdown {
+                handle.shutdown();
+            }
+            while let Some(result) = tasks.join_next().await {
+                map_server_result(result)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn map_server_result(
+    result: Result<Result<(), TransportError>, tokio::task::JoinError>,
+) -> Result<(), ServerError> {
     match result {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => Err(ServerError::Transport(error.to_string())),
         Err(error) => Err(ServerError::Task(error.to_string())),
+    }
+}
+
+async fn shutdown_signal() -> Result<(), ServerError> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|error| ServerError::Signal(error.to_string()))?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                result.map_err(|error| ServerError::Signal(error.to_string()))?;
+            }
+            _ = terminate.recv() => {}
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await.map_err(|error| ServerError::Signal(error.to_string()))
     }
 }

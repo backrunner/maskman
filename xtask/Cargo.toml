@@ -8,6 +8,7 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+maskman-protocol = { path = "../crates/maskman-protocol", version = "0.1.0" }
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
 toml = "0.8"

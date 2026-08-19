@@ -12,6 +12,8 @@ use super::{TransportContext, TransportLimits, TransportMode, TransportServer};
 
 #[path = "ip_transport_tests.rs"]
 mod ip_tests;
+#[path = "udp_transport_tests.rs"]
+mod udp_tests;
 
 type ClientDriver = h3::client::Connection<h3_quinn::Connection, Bytes>;
 type RequestSender = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;

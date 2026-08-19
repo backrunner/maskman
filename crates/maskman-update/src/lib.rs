@@ -23,9 +23,9 @@ pub(crate) const MAX_ARCHIVE_TOTAL_BYTES: u64 = 128 * 1024 * 1024;
 pub(crate) const MAX_ARCHIVE_ENTRIES: usize = 512;
 pub(crate) const MAX_HEALTH_WAIT: Duration = Duration::from_secs(5);
 
-// Rotate only in a release that carries both old and new verification keys.
-pub const RELEASE_PUBLIC_KEY_HEX: &str =
+pub(crate) const INSECURE_TEST_PUBLIC_KEY_HEX: &str =
     "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+pub const RELEASE_PUBLIC_KEY_HEX: Option<&str> = option_env!("MASKMAN_RELEASE_PUBLIC_KEY_HEX");
 
 #[derive(Debug, Error)]
 pub enum UpdateError {
@@ -35,6 +35,13 @@ pub enum UpdateError {
     InvalidVersion(String),
     #[error("the current target is not one of the supported release triples")]
     UnsupportedTarget,
+    #[error(
+        "self-update is disabled because this binary was built without \
+         MASKMAN_RELEASE_PUBLIC_KEY_HEX"
+    )]
+    ReleaseKeyUnavailable,
+    #[error("self-update refuses the public RFC 8032 test key")]
+    InsecureReleaseKey,
     #[error("GitHub release request failed: {0}")]
     Http(String),
     #[error("no signed release was found for version {0} and target {1}")]
