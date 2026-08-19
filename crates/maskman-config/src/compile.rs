@@ -18,6 +18,7 @@ pub struct CompiledConfig {
     pub max_connections: u32,
     pub max_requests_per_connection: u32,
     pub max_header_bytes: u32,
+    pub state_dir: PathBuf,
     pub certificate_file: PathBuf,
     pub private_key_file: PathBuf,
     pub client_ca_file: Option<PathBuf>,
@@ -148,6 +149,7 @@ pub fn compile(
         max_connections: document.server.max_connections,
         max_requests_per_connection: document.server.max_requests_per_connection,
         max_header_bytes: document.server.max_header_bytes,
+        state_dir: resolve_path(base_dir, &document.server.state_dir),
         certificate_file: resolve_path(base_dir, &document.tls.certificate_file),
         private_key_file: resolve_path(base_dir, &document.tls.private_key_file),
         client_ca_file: document

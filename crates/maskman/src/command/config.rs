@@ -12,7 +12,11 @@ pub fn run(config: Option<&Path>, command: ConfigCommand, output: Output) -> Res
                 .with_context(|| format!("validating config {}", path.display()))?;
             output.info(format!("validated {}", path.display()));
             if check_system {
-                output.warning("system prerequisite checks are not implemented in M0");
+                check_system_prerequisites(compiled.ip.enabled)?;
+                output.success(format!(
+                    "{} platform prerequisites available",
+                    maskman_platform::platform_name()
+                ));
             }
             output.success(format!(
                 "configuration valid: {} listener(s), auth_required={}, udp={}, ip={}",
@@ -24,4 +28,17 @@ pub fn run(config: Option<&Path>, command: ConfigCommand, output: Output) -> Res
             Ok(())
         }
     }
+}
+
+fn check_system_prerequisites(ip_enabled: bool) -> Result<()> {
+    if !ip_enabled {
+        return Ok(());
+    }
+    if cfg!(target_os = "linux") && !std::path::Path::new("/dev/net/tun").exists() {
+        anyhow::bail!("CONNECT-IP is enabled but /dev/net/tun is unavailable")
+    }
+    if !cfg!(target_os = "linux") && !cfg!(target_os = "macos") {
+        anyhow::bail!("CONNECT-IP platform support is unavailable on this target")
+    }
+    Ok(())
 }

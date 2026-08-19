@@ -107,6 +107,7 @@ pub fn validate(document: &ConfigDocument) -> Result<(), ValidationError> {
     }
     check_non_empty("tls.certificate_file", &document.tls.certificate_file)?;
     check_non_empty("tls.private_key_file", &document.tls.private_key_file)?;
+    check_non_empty("server.state_dir", &document.server.state_dir)?;
     check_duration("server.idle_timeout", &document.server.idle_timeout)?;
     check_duration("server.drain_timeout", &document.server.drain_timeout)?;
     check_duration("proxy.udp.socket_idle_timeout", &document.proxy.udp.socket_idle_timeout)?;

@@ -54,6 +54,8 @@ pub struct ServerConfig {
     pub max_requests_per_connection: u32,
     #[serde(default = "default_max_header_bytes")]
     pub max_header_bytes: u32,
+    #[serde(default = "default_state_dir")]
+    pub state_dir: String,
 }
 
 impl Default for ServerConfig {
@@ -67,6 +69,7 @@ impl Default for ServerConfig {
             max_connections: default_max_connections(),
             max_requests_per_connection: default_max_requests_per_connection(),
             max_header_bytes: default_max_header_bytes(),
+            state_dir: default_state_dir(),
         }
     }
 }
@@ -354,6 +357,13 @@ fn default_max_requests_per_connection() -> u32 {
 }
 fn default_max_header_bytes() -> u32 {
     16_384
+}
+fn default_state_dir() -> String {
+    if cfg!(target_os = "macos") {
+        "/Library/Application Support/Maskman/state".into()
+    } else {
+        "/var/lib/maskman".into()
+    }
 }
 fn default_certificate_file() -> String {
     "tls/fullchain.pem".into()

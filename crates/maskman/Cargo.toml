@@ -12,6 +12,7 @@ anyhow = "1.0"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive", "env", "color"] }
 maskman-config = { path = "../maskman-config", version = "0.1.0" }
+maskman-platform = { path = "../maskman-platform", version = "0.1.0" }
 maskman-server = { path = "../maskman-server", version = "0.1.0" }
 maskman-update = { path = "../maskman-update", version = "0.1.0" }
 rand = "0.8"

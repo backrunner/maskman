@@ -30,6 +30,8 @@ pub enum Command {
     Serve,
     Status(StatusArgs),
     Install(ActionArgs),
+    Uninstall(ActionArgs),
+    Cleanup(ActionArgs),
     Start(ActionArgs),
     Stop(ActionArgs),
     Reload(ActionArgs),
@@ -69,6 +71,8 @@ pub struct StatusArgs {
 pub struct ActionArgs {
     #[arg(long)]
     pub yes: bool,
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]
@@ -77,6 +81,8 @@ pub struct UpdateArgs {
     pub check: bool,
     #[arg(long)]
     pub yes: bool,
+    #[arg(long)]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]

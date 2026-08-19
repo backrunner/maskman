@@ -49,6 +49,15 @@ impl TunDevice {
         self.mtu
     }
 
+    pub fn interface_index(&self) -> Result<u32, PlatformError> {
+        self.device
+            .get_ref()
+            .name()
+            .map_err(PlatformError::TunIo)?
+            .index()
+            .map_err(PlatformError::TunIo)
+    }
+
     pub async fn recv(&self, packet: &mut [u8]) -> Result<usize, PlatformError> {
         loop {
             let mut guard = self.device.readable().await.map_err(PlatformError::TunIo)?;

@@ -499,6 +499,7 @@ dependencies = [
  "base64",
  "clap",
  "maskman-config",
+ "maskman-platform",
  "maskman-server",
  "maskman-update",
  "rand 0.8.7",
@@ -525,6 +526,8 @@ version = "0.1.0"
 dependencies = [
  "ipnet",
  "rtnetlink",
+ "serde",
+ "serde_json",
  "tappers",
  "thiserror",
  "tokio",
