@@ -1,9 +1,10 @@
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
 
 use ipnet::IpNet;
+use time::OffsetDateTime;
 
 use crate::{
-    model::{ConfigDocument, NatMode},
+    model::{AuthMode, ConfigDocument, NatMode},
     validate::{parse_duration, resolve_path},
     ConfigError,
 };
@@ -21,8 +22,10 @@ pub struct CompiledConfig {
     pub private_key_file: PathBuf,
     pub client_ca_file: Option<PathBuf>,
     pub auth_required: bool,
+    pub auth_mode: AuthMode,
     pub principals: HashMap<String, Vec<String>>,
-    pub token_principals: HashMap<String, String>,
+    pub token_principals: HashMap<String, CompiledToken>,
+    pub certificate_principals: HashMap<String, String>,
     pub roles: HashMap<String, CompiledRole>,
     pub udp: CompiledUdp,
     pub ip: CompiledIp,
@@ -36,6 +39,23 @@ pub struct CompiledRole {
     pub deny_destinations: Vec<IpNet>,
     pub deny_private: bool,
     pub allowed_ip_protocols: Vec<String>,
+    pub limits: CompiledLimits,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledLimits {
+    pub active_tunnels: u32,
+    pub new_tunnels_per_minute: u32,
+    pub ingress_bytes_per_second: u64,
+    pub egress_bytes_per_second: u64,
+    pub burst_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledToken {
+    pub principal: String,
+    pub secret_sha256: [u8; 32],
+    pub expires_at: Option<OffsetDateTime>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +63,7 @@ pub struct CompiledUdp {
     pub enabled: bool,
     pub idle_timeout: Duration,
     pub max_payload_bytes: u32,
+    pub prefer_ipv6: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -71,12 +92,6 @@ pub fn compile(
     for principal in &document.auth.principals {
         principals.insert(principal.id.clone(), principal.roles.clone());
     }
-    let mut token_principals = HashMap::new();
-    for token in &document.auth.bearer_tokens {
-        if token.enabled {
-            token_principals.insert(token.id.clone(), token.principal.clone());
-        }
-    }
     let mut roles = HashMap::new();
     for role in &document.policy.roles {
         roles.insert(
@@ -87,8 +102,38 @@ pub fn compile(
                 deny_destinations: parse_networks(&role.deny_destinations)?,
                 deny_private: role.deny_private,
                 allowed_ip_protocols: role.allowed_ip_protocols.clone(),
+                limits: CompiledLimits {
+                    active_tunnels: role.limits.active_tunnels,
+                    new_tunnels_per_minute: role.limits.new_tunnels_per_minute,
+                    ingress_bytes_per_second: role.limits.ingress_bytes_per_second,
+                    egress_bytes_per_second: role.limits.egress_bytes_per_second,
+                    burst_bytes: role.limits.burst_bytes,
+                },
             },
         );
+    }
+    let mut token_principals = HashMap::new();
+    for token in &document.auth.bearer_tokens {
+        if token.enabled {
+            token_principals.insert(
+                token.id.clone(),
+                CompiledToken {
+                    principal: token.principal.clone(),
+                    secret_sha256: decode_hash(&token.secret_sha256, &token.id)?,
+                    expires_at: token.expires_at.as_deref().map(parse_expiry).transpose().map_err(
+                        |error| {
+                            ConfigError::Invariant(format!("token {} expiry: {error}", token.id))
+                        },
+                    )?,
+                },
+            );
+        }
+    }
+    let mut certificate_principals = HashMap::new();
+    for principal in &document.auth.principals {
+        for digest in &principal.certificate_sha256 {
+            certificate_principals.insert(digest.to_ascii_lowercase(), principal.id.clone());
+        }
     }
     let metrics_listen =
         parse_socket_addr(&document.observability.metrics_listen, "observability.metrics_listen")?;
@@ -111,8 +156,10 @@ pub fn compile(
             .as_deref()
             .map(|value| resolve_path(base_dir, value)),
         auth_required: document.auth.required,
+        auth_mode: document.auth.mode.clone(),
         principals,
         token_principals,
+        certificate_principals,
         roles,
         udp: CompiledUdp {
             enabled: document.proxy.udp.enabled,
@@ -121,6 +168,7 @@ pub fn compile(
                 "proxy.udp.socket_idle_timeout",
             )?,
             max_payload_bytes: document.proxy.udp.max_payload_bytes,
+            prefer_ipv6: document.proxy.udp.prefer_ipv6,
         },
         ip: CompiledIp {
             enabled: document.proxy.ip.enabled,
@@ -169,4 +217,36 @@ fn parse_optional_network(value: Option<&str>, field: &str) -> Result<Option<IpN
                 .map_err(|error| ConfigError::Invariant(format!("{field} `{value}`: {error}")))
         })
         .transpose()
+}
+
+fn decode_hash(value: &str, token: &str) -> Result<[u8; 32], ConfigError> {
+    if value.len() != 64 {
+        return Err(ConfigError::Invariant(format!(
+            "token {token} contains an invalid SHA-256 value"
+        )));
+    }
+    let mut output = [0u8; 32];
+    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        let high = hex_digit(chunk[0]).ok_or_else(|| {
+            ConfigError::Invariant(format!("token {token} contains an invalid SHA-256 value"))
+        })?;
+        let low = hex_digit(chunk[1]).ok_or_else(|| {
+            ConfigError::Invariant(format!("token {token} contains an invalid SHA-256 value"))
+        })?;
+        output[index] = (high << 4) | low;
+    }
+    Ok(output)
+}
+
+fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn parse_expiry(value: &str) -> Result<OffsetDateTime, time::error::Parse> {
+    OffsetDateTime::parse(value, &time::format_description::well_known::Rfc3339)
 }

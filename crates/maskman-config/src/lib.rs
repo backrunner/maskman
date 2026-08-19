@@ -9,10 +9,12 @@ use std::{
     str::FromStr,
 };
 
-pub use compile::{CompiledConfig, CompiledIp, CompiledRole, CompiledUdp};
+pub use compile::{
+    CompiledConfig, CompiledIp, CompiledLimits, CompiledRole, CompiledToken, CompiledUdp,
+};
 pub use error::ConfigError;
 pub use load::render;
-pub use model::ConfigDocument;
+pub use model::{AuthMode, ConfigDocument};
 pub use validate::{parse_duration, resolve_path, validate, ValidationError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +53,13 @@ pub fn compile(path: &Path) -> Result<CompiledConfig, ConfigError> {
     let document = load(path)?;
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     compile::compile(&document, base_dir)
+}
+
+pub fn compile_document(
+    document: &ConfigDocument,
+    base_dir: &Path,
+) -> Result<CompiledConfig, ConfigError> {
+    compile::compile(document, base_dir)
 }
 
 #[cfg(test)]

@@ -8,7 +8,7 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
 use crate::datagram;
 
-use super::{TransportLimits, TransportMode, TransportServer};
+use super::{TransportContext, TransportLimits, TransportMode, TransportServer};
 
 type ClientDriver = h3::client::Connection<h3_quinn::Connection, Bytes>;
 type RequestSender = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
@@ -39,6 +39,187 @@ async fn connect_udp_supports_both_datagram_paths_and_migration() {
     second.stop_sending(h3::error::Code::H3_NO_ERROR);
     client.endpoint.close(0u32.into(), b"test complete");
     client.server_task.abort();
+}
+
+#[tokio::test]
+async fn authenticated_connect_udp_forwards_to_connected_socket() {
+    let target = tokio::net::UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap_or_else(|error| panic!("bind UDP target: {error}"));
+    let target_address =
+        target.local_addr().unwrap_or_else(|error| panic!("read UDP target address: {error}"));
+    let mut document = maskman_config::ConfigDocument::default();
+    document.proxy.udp.enabled = true;
+    document.proxy.udp.max_payload_bytes = 1200;
+    document.auth.principals.push(maskman_config::model::PrincipalConfig {
+        id: "client".into(),
+        roles: vec!["udp".into()],
+        certificate_sha256: Vec::new(),
+    });
+    document.auth.bearer_tokens.push(maskman_config::model::BearerTokenConfig {
+        id: "token".into(),
+        principal: "client".into(),
+        secret_sha256: hex_sha256("secret"),
+        expires_at: None,
+        enabled: true,
+    });
+    document.policy.roles.push(maskman_config::model::RoleConfig {
+        name: "udp".into(),
+        capabilities: vec!["connect-udp".into()],
+        allow_destinations: vec!["127.0.0.1/32".into()],
+        deny_destinations: Vec::new(),
+        deny_private: false,
+        allowed_ip_protocols: Vec::new(),
+        limits: Default::default(),
+    });
+    let compiled = maskman_config::compile_document(&document, std::path::Path::new("."))
+        .unwrap_or_else(|error| panic!("compile UDP config: {error}"));
+    let context = Arc::new(TransportContext::new(Arc::new(compiled)));
+    let (server_config, certificate) = test_server_config();
+    let server = TransportServer::bind_with_context(
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        server_config,
+        test_limits(),
+        TransportMode::RejectUntilAuthentication,
+        context,
+    )
+    .unwrap_or_else(|error| panic!("bind authenticated server: {error}"));
+    let address = server
+        .local_addr()
+        .unwrap_or_else(|error| panic!("read authenticated server address: {error}"));
+    let server_task = tokio::spawn(server.run());
+    let mut endpoint = Endpoint::client(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .unwrap_or_else(|error| panic!("bind authenticated client: {error}"));
+    endpoint.set_default_client_config(test_client_config(certificate));
+    let connection = endpoint
+        .connect(address, "localhost")
+        .unwrap_or_else(|error| panic!("connect authenticated client: {error}"))
+        .await
+        .unwrap_or_else(|error| panic!("complete authenticated client: {error}"));
+    let (mut driver, mut sender) = h3_client(connection.clone()).await;
+    let path = format!("/.well-known/masque/udp/127.0.0.1/{}/", target_address.port());
+    let mut request = Request::builder()
+        .method(Method::CONNECT)
+        .uri(format!("https://proxy.example{path}"))
+        .version(Version::HTTP_3)
+        .header("capsule-protocol", "?1")
+        .header("authorization", "Bearer mm_token_secret")
+        .body(())
+        .unwrap_or_else(|error| panic!("build authenticated request: {error}"));
+    request.extensions_mut().insert(h3::ext::Protocol::CONNECT_UDP);
+    let mut stream = sender
+        .send_request(request)
+        .await
+        .unwrap_or_else(|error| panic!("send authenticated request: {error}"));
+    let response = stream
+        .recv_response()
+        .await
+        .unwrap_or_else(|error| panic!("receive authenticated response: {error}"));
+    assert_eq!(response.status(), StatusCode::OK);
+    let stream_id = stream.id().into_inner();
+    let mut payload = Vec::new();
+    maskman_protocol::capsule::encode_datagram(0, b"ping", &mut payload)
+        .unwrap_or_else(|error| panic!("encode UDP payload: {error}"));
+    let encoded = datagram::encode(stream_id, Bytes::from(payload))
+        .unwrap_or_else(|error| panic!("encode HTTP datagram: {error}"));
+    connection.send_datagram(encoded).unwrap_or_else(|error| panic!("send HTTP datagram: {error}"));
+    let mut received = [0; 32];
+    let (length, peer) =
+        tokio::time::timeout(Duration::from_secs(2), target.recv_from(&mut received))
+            .await
+            .unwrap_or_else(|error| panic!("wait for UDP target packet: {error}"))
+            .unwrap_or_else(|error| panic!("receive UDP target packet: {error}"));
+    assert_eq!(&received[..length], b"ping");
+    target
+        .send_to(b"pong", peer)
+        .await
+        .unwrap_or_else(|error| panic!("send UDP target reply: {error}"));
+    let reply = tokio::time::timeout(Duration::from_secs(2), connection.read_datagram())
+        .await
+        .unwrap_or_else(|error| panic!("wait for HTTP datagram reply: {error}"))
+        .unwrap_or_else(|error| panic!("read HTTP datagram reply: {error}"));
+    let reply = datagram::decode(reply).unwrap_or_else(|error| panic!("decode reply: {error}"));
+    let reply = maskman_protocol::capsule::decode_datagram(&reply.payload)
+        .unwrap_or_else(|error| panic!("decode UDP reply: {error}"));
+    assert_eq!(reply.context_id, 0);
+    assert_eq!(reply.payload, b"pong");
+    stream.stop_sending(h3::error::Code::H3_NO_ERROR);
+    endpoint.close(0u32.into(), b"test complete");
+    let _ = driver.wait_idle().await;
+    server_task.abort();
+}
+
+#[tokio::test]
+async fn unauthenticated_connect_udp_is_rejected_before_forwarding() {
+    let target = tokio::net::UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap_or_else(|error| panic!("bind UDP target: {error}"));
+    let target_address =
+        target.local_addr().unwrap_or_else(|error| panic!("read UDP target address: {error}"));
+    let mut document = maskman_config::ConfigDocument::default();
+    document.proxy.udp.enabled = true;
+    document.proxy.udp.max_payload_bytes = 1200;
+    document.auth.principals.push(maskman_config::model::PrincipalConfig {
+        id: "client".into(),
+        roles: vec!["udp".into()],
+        certificate_sha256: Vec::new(),
+    });
+    document.auth.bearer_tokens.push(maskman_config::model::BearerTokenConfig {
+        id: "token".into(),
+        principal: "client".into(),
+        secret_sha256: hex_sha256("secret"),
+        expires_at: None,
+        enabled: true,
+    });
+    document.policy.roles.push(maskman_config::model::RoleConfig {
+        name: "udp".into(),
+        capabilities: vec!["connect-udp".into()],
+        allow_destinations: vec!["127.0.0.1/32".into()],
+        deny_destinations: Vec::new(),
+        deny_private: false,
+        allowed_ip_protocols: Vec::new(),
+        limits: Default::default(),
+    });
+    let compiled = maskman_config::compile_document(&document, std::path::Path::new("."))
+        .unwrap_or_else(|error| panic!("compile UDP config: {error}"));
+    let context = Arc::new(TransportContext::new(Arc::new(compiled)));
+    let (server_config, certificate) = test_server_config();
+    let server = TransportServer::bind_with_context(
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        server_config,
+        test_limits(),
+        TransportMode::RejectUntilAuthentication,
+        context,
+    )
+    .unwrap_or_else(|error| panic!("bind authenticated server: {error}"));
+    let address =
+        server.local_addr().unwrap_or_else(|error| panic!("read server address: {error}"));
+    let server_task = tokio::spawn(server.run());
+    let mut endpoint = Endpoint::client(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .unwrap_or_else(|error| panic!("bind client: {error}"));
+    endpoint.set_default_client_config(test_client_config(certificate));
+    let connection = endpoint
+        .connect(address, "localhost")
+        .unwrap_or_else(|error| panic!("connect client: {error}"))
+        .await
+        .unwrap_or_else(|error| panic!("complete client connection: {error}"));
+    let (_driver, mut sender) = h3_client(connection).await;
+    let path = format!("/.well-known/masque/udp/127.0.0.1/{}/", target_address.port());
+    let mut stream = send_connect_udp(&mut sender, &path).await;
+    let response =
+        stream.recv_response().await.unwrap_or_else(|error| panic!("receive rejection: {error}"));
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let mut buffer = [0u8; 32];
+    assert!(tokio::time::timeout(Duration::from_millis(100), target.recv_from(&mut buffer))
+        .await
+        .is_err());
+    endpoint.close(0u32.into(), b"test complete");
+    server_task.abort();
+}
+
+fn hex_sha256(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(value.as_bytes()).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[tokio::test]

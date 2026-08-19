@@ -1,6 +1,10 @@
 use std::{path::Path, sync::Arc};
 
-use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer};
+use rustls::{
+    pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
+    server::WebPkiClientVerifier,
+    RootCertStore,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -15,21 +19,51 @@ pub enum TlsError {
     Certificate(#[from] rustls::Error),
     #[error("failed to adapt TLS configuration to Quinn: {0}")]
     Quinn(String),
+    #[error("failed to build client certificate verifier: {0}")]
+    ClientVerifier(String),
 }
 
 pub fn load_server_config(
     certificate_file: &Path,
     private_key_file: &Path,
 ) -> Result<quinn::ServerConfig, TlsError> {
+    load_server_config_with_client_ca(certificate_file, private_key_file, None)
+}
+
+pub fn load_server_config_with_client_ca(
+    certificate_file: &Path,
+    private_key_file: &Path,
+    client_ca_file: Option<&Path>,
+) -> Result<quinn::ServerConfig, TlsError> {
     let certificates = load_certificates(certificate_file)?;
     let private_key = load_private_key(private_key_file)?;
-    let mut crypto = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certificates, private_key)?;
+    let builder = rustls::ServerConfig::builder();
+    let mut crypto = match client_ca_file {
+        Some(path) => {
+            let roots = load_roots(path)?;
+            let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+                .allow_unauthenticated()
+                .build()
+                .map_err(|error| TlsError::ClientVerifier(error.to_string()))?;
+            builder
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(certificates, private_key)?
+        }
+        None => builder.with_no_client_auth().with_single_cert(certificates, private_key)?,
+    };
     crypto.alpn_protocols = vec![b"h3".to_vec()];
     let quic_crypto = quinn::crypto::rustls::QuicServerConfig::try_from(crypto)
         .map_err(|error| TlsError::Quinn(error.to_string()))?;
     Ok(quinn::ServerConfig::with_crypto(Arc::new(quic_crypto)))
+}
+
+fn load_roots(path: &Path) -> Result<RootCertStore, TlsError> {
+    let certificates = load_certificates(path)?;
+    let mut roots = RootCertStore::empty();
+    for certificate in certificates {
+        roots.add(certificate).map_err(TlsError::Certificate)?;
+    }
+    Ok(roots)
 }
 
 fn load_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>, TlsError> {

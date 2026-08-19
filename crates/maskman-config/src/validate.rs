@@ -52,6 +52,8 @@ pub enum ValidationError {
     MissingPrincipal { token: String, principal: String },
     #[error("bearer token {token} has an invalid SHA-256 value")]
     TokenHash { token: String },
+    #[error("principal {principal} has an invalid certificate SHA-256 value")]
+    CertificateHash { principal: String },
     #[error("bearer token {token} has an invalid expiry: {value}")]
     TokenExpiry { token: String, value: String },
     #[error("role {role} contains unsupported capability {capability}")]
@@ -149,6 +151,12 @@ fn validate_auth(document: &ConfigDocument) -> Result<(), ValidationError> {
                 kind: "principal",
                 id: principal.id.clone(),
             });
+        }
+        for digest in &principal.certificate_sha256 {
+            if digest.len() != 64 || !digest.chars().all(|character| character.is_ascii_hexdigit())
+            {
+                return Err(ValidationError::CertificateHash { principal: principal.id.clone() });
+            }
         }
     }
     let mut roles = HashSet::new();

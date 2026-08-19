@@ -1,10 +1,16 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use bytes::Bytes;
+use maskman_config::CompiledConfig;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{sync::watch, task::JoinSet};
 
-use crate::{datagram, request, tls};
+use crate::{
+    datagram, request,
+    session::{QuotaState, SessionRegistry},
+    tls,
+};
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -45,6 +51,18 @@ pub struct TransportServer {
     drain_timeout: Duration,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
+    context: Option<Arc<TransportContext>>,
+}
+
+pub struct TransportContext {
+    pub(crate) config: Arc<CompiledConfig>,
+    pub(crate) quotas: Arc<QuotaState>,
+}
+
+impl TransportContext {
+    pub fn new(config: Arc<CompiledConfig>) -> Self {
+        Self { config, quotas: Arc::new(QuotaState::default()) }
+    }
 }
 
 #[derive(Clone)]
@@ -76,7 +94,20 @@ impl TransportServer {
             drain_timeout: limits.drain_timeout,
             shutdown_tx,
             shutdown_rx,
+            context: None,
         })
+    }
+
+    pub fn bind_with_context(
+        address: SocketAddr,
+        server_config: quinn::ServerConfig,
+        limits: TransportLimits,
+        mode: TransportMode,
+        context: Arc<TransportContext>,
+    ) -> Result<Self, TransportError> {
+        let mut server = Self::bind(address, server_config, limits, mode)?;
+        server.context = Some(context);
+        Ok(server)
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr, TransportError> {
@@ -107,8 +138,9 @@ impl TransportServer {
                     let max_header_bytes = self.max_header_bytes;
                     let mode = self.mode;
                     let shutdown = self.shutdown_rx.clone();
+                    let context = self.context.clone();
                     connections.spawn(async move {
-                        handle_connection(incoming, max_header_bytes, mode, shutdown).await
+                        handle_connection(incoming, max_header_bytes, mode, shutdown, context).await
                     });
                 }
                 completed = connections.join_next(), if !connections.is_empty() => {
@@ -172,13 +204,23 @@ pub fn server_config(
     Ok(tls::load_server_config(certificate_file, private_key_file)?)
 }
 
+pub fn server_config_with_client_ca(
+    certificate_file: &std::path::Path,
+    private_key_file: &std::path::Path,
+    client_ca_file: Option<&std::path::Path>,
+) -> Result<quinn::ServerConfig, TransportError> {
+    Ok(tls::load_server_config_with_client_ca(certificate_file, private_key_file, client_ca_file)?)
+}
+
 async fn handle_connection(
     incoming: quinn::Incoming,
     max_header_bytes: u32,
     mode: TransportMode,
     shutdown: watch::Receiver<bool>,
+    context: Option<Arc<TransportContext>>,
 ) -> Result<(), TransportError> {
     let connection = incoming.await?;
+    let peer_certificate_sha256 = peer_certificate_sha256(&connection);
     let datagram_connection = connection.clone();
     let quic = h3_quinn::Connection::new(connection);
     let mut builder = h3::server::builder();
@@ -187,7 +229,15 @@ async fn handle_connection(
         .enable_extended_connect(true)
         .enable_datagram(true);
     let mut http3 = builder.build(quic).await?;
-    drive_connection(&mut http3, &datagram_connection, mode, shutdown).await
+    drive_connection(
+        &mut http3,
+        &datagram_connection,
+        mode,
+        shutdown,
+        context,
+        peer_certificate_sha256,
+    )
+    .await
 }
 
 async fn drive_connection(
@@ -195,7 +245,10 @@ async fn drive_connection(
     datagram_connection: &quinn::Connection,
     mode: TransportMode,
     mut shutdown: watch::Receiver<bool>,
+    context: Option<Arc<TransportContext>>,
+    peer_certificate_sha256: Option<[u8; 32]>,
 ) -> Result<(), TransportError> {
+    let registry = Arc::new(SessionRegistry::default());
     let mut draining = *shutdown.borrow();
     if draining {
         http3.shutdown(0).await?;
@@ -210,15 +263,27 @@ async fn drive_connection(
             },
             request = http3.accept() => match request? {
                 Some(resolver) => {
-                    tokio::spawn(request::handle(resolver, request_mode(mode)));
+                    let request_context = context.as_ref().map(|context| request::RequestContext {
+                        config: context.config.clone(),
+                        registry: registry.clone(),
+                        quotas: context.quotas.clone(),
+                        connection: datagram_connection.clone(),
+                        peer_certificate_sha256,
+                    });
+                    tokio::spawn(async move {
+                        let _ = request::handle(resolver, request_mode(mode), request_context).await;
+                    });
                 }
                 None => return Ok(()),
             },
             raw = datagram_connection.read_datagram(), if !draining => {
                 let raw = raw.map_err(|error| TransportError::Datagram(error.to_string()))?;
-                let datagram = datagram::decode(raw)
-                    .map_err(|error| TransportError::Datagram(error.to_string()))?;
-                if mode == TransportMode::EchoDatagrams {
+                let Ok(datagram) = datagram::decode(raw) else {
+                    continue;
+                };
+                if context.is_some() {
+                    forward_datagram(&registry, datagram.stream_id, datagram.payload, 65_527);
+                } else if mode == TransportMode::EchoDatagrams {
                     let encoded = datagram::encode(datagram.stream_id, datagram.payload)
                         .map_err(|error| TransportError::Datagram(error.to_string()))?;
                     datagram_connection
@@ -228,6 +293,30 @@ async fn drive_connection(
             },
         }
     }
+}
+
+fn forward_datagram(
+    registry: &SessionRegistry,
+    stream_id: u64,
+    payload: Bytes,
+    max_payload: usize,
+) {
+    let Ok(datagram) = maskman_protocol::capsule::decode_datagram(&payload) else {
+        return;
+    };
+    if datagram.context_id != 0 || datagram.payload.len() > max_payload {
+        return;
+    }
+    let _ = registry.try_send(stream_id, Bytes::copy_from_slice(datagram.payload));
+}
+
+fn peer_certificate_sha256(connection: &quinn::Connection) -> Option<[u8; 32]> {
+    let identity = connection.peer_identity()?;
+    let certificates =
+        identity.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>().ok()?;
+    let certificate = certificates.first()?;
+    let digest = Sha256::digest(certificate.as_ref());
+    Some(digest.into())
 }
 
 fn request_mode(mode: TransportMode) -> request::RequestMode {

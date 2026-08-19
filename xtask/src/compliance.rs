@@ -104,8 +104,10 @@ fn validate(root: &Path, matrix: &Matrix) -> Result<(), ComplianceError> {
 }
 
 fn validate_profile(profile: &Profile) -> Result<(), ComplianceError> {
-    if profile.name.trim().is_empty() || profile.scope != "m2-codec" {
-        return invalid("profile must name the m2-codec scope");
+    if profile.name.trim().is_empty()
+        || !matches!(profile.scope.as_str(), "m2-codec" | "v1-cumulative")
+    {
+        return invalid("profile must name the m2-codec or v1-cumulative scope");
     }
     if profile.http_versions != ["h3"] {
         return invalid("v1 compliance profile must contain only h3");
