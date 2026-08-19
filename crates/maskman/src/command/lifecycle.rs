@@ -7,11 +7,11 @@ use crate::{
     output::Output,
 };
 
-pub fn serve(config: Option<&Path>, _output: Output) -> Result<()> {
+pub async fn serve(config: Option<&Path>, _output: Output) -> Result<()> {
     let path = config.ok_or_else(|| anyhow::anyhow!("--config is required for serve"))?;
     let compiled = maskman_config::compile(path)
         .with_context(|| format!("loading config {}", path.display()))?;
-    maskman_server::serve(compiled).map_err(Into::into)
+    maskman_server::serve(compiled).await.map_err(Into::into)
 }
 
 pub fn status(config: Option<&Path>, args: StatusArgs, output: Output) -> Result<()> {
@@ -28,11 +28,12 @@ pub fn status(config: Option<&Path>, args: StatusArgs, output: Output) -> Result
                 "connections": status.connections,
                 "udp_sessions": status.udp_sessions,
                 "ip_sessions": status.ip_sessions,
-                "transport_ready": false
+                "transport_ready": true,
+                "proxy_ready": false
             })
         );
     } else {
-        output.warning("transport is not ready; M1 HTTP/3 spike is still pending");
+        output.warning("HTTP/3 transport is available; proxy forwarding is not implemented yet");
         output.success(format!(
             "configured listeners: {}, active connections: {}",
             status.listen.len(),

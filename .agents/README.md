@@ -1,6 +1,6 @@
 # Maskman 实现方案索引
 
-状态：架构调研完成，M0 Rust workspace 与 CLI/config/protocol 基础已实现；HTTP/3 transport、真实代理和平台副作用仍按里程碑推进
+状态：M0 工程基线和 M1 HTTP/3 transport spike 已实现；认证、真实代理和平台副作用仍按里程碑推进
 调研基线：2026-08-20
 目标：单一 Rust 二进制，作为长期运行的 MASQUE daemon，同时提供安装、配置、生命周期管理和自更新 CLI。
 
@@ -28,6 +28,7 @@
 - [05-security.md](05-security.md)：认证、授权、滥用防护、权限隔离和更新供应链。
 - [06-quality-and-release.md](06-quality-and-release.md)：测试、互操作、性能、CI 和发布流程。
 - [07-milestones.md](07-milestones.md)：阶段、验收门槛、工期和风险。
+- [08-transport-spike.md](08-transport-spike.md)：M1 固定依赖、transport gate、互操作结果和已知上游缺口。
 - [skills/maskman-guard/SKILL.md](skills/maskman-guard/SKILL.md)：后续开发和审查必须使用的工程 guard。
 
 ## v1 完成定义

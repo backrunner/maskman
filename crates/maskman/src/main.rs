@@ -5,8 +5,9 @@ mod output;
 use anyhow::Result;
 use clap::Parser;
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     let cli = cli::Cli::parse();
     let output = output::Output::new(cli.color, cli.verbose);
-    command::run(cli, output)
+    command::run(cli, output).await
 }

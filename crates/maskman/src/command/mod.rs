@@ -9,11 +9,11 @@ use crate::{
     output::Output,
 };
 
-pub fn run(cli: Cli, output: Output) -> Result<()> {
+pub async fn run(cli: Cli, output: Output) -> Result<()> {
     match cli.command {
         Command::Setup(args) => setup::run(cli.config.as_deref(), args, output),
         Command::Config(command) => config::run(cli.config.as_deref(), command, output),
-        Command::Serve => lifecycle::serve(cli.config.as_deref(), output),
+        Command::Serve => lifecycle::serve(cli.config.as_deref(), output).await,
         Command::Status(args) => lifecycle::status(cli.config.as_deref(), args, output),
         Command::Install(args) => lifecycle::action("install", args.yes, output),
         Command::Start(args) => lifecycle::action("start", args.yes, output),

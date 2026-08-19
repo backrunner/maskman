@@ -7,9 +7,19 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bytes = "1.10"
+h3 = { version = "0.0.8", git = "https://github.com/hyperium/h3", rev = "1f3d5295833ad454343f25d55633fb6bee1027b2" }
+h3-quinn = { version = "0.0.10", git = "https://github.com/hyperium/h3", rev = "1f3d5295833ad454343f25d55633fb6bee1027b2" }
+http = "1.3"
 maskman-config = { path = "../maskman-config", version = "0.1.0" }
 maskman-protocol = { path = "../maskman-protocol", version = "0.1.0" }
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 thiserror = "2.0"
+tokio = { version = "1.47", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+rcgen = "0.13"
 
 [lints]
 workspace = true
