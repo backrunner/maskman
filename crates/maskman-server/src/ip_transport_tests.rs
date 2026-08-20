@@ -122,7 +122,7 @@ async fn authenticated_connect_ip_assigns_and_forwards_through_tun_boundary() {
         .await
         .unwrap_or_else(|error| panic!("wait for TUN packet: {error}"))
         .unwrap_or_else(|| panic!("TUN queue closed"));
-    assert_eq!(forwarded[8], 63);
+    assert_eq!(forwarded[8], 64);
     assert_eq!(&forwarded[12..16], &assigned.octets());
     assert_eq!(&forwarded[16..20], &[8, 8, 8, 8]);
     let inbound = ipv4_packet([8, 8, 8, 8], assigned.octets(), 64, b"pong");
@@ -137,7 +137,8 @@ async fn authenticated_connect_ip_assigns_and_forwards_through_tun_boundary() {
     let response_datagram = maskman_protocol::capsule::decode_datagram(&response_datagram.payload)
         .unwrap_or_else(|error| panic!("decode IP datagram: {error}"));
     assert_eq!(response_datagram.context_id, 0);
-    assert_eq!(response_datagram.payload, inbound.as_slice());
+    assert_eq!(response_datagram.payload[8], 63);
+    assert_eq!(&response_datagram.payload[12..], &inbound[12..]);
     stream.stop_sending(h3::error::Code::H3_NO_ERROR);
     endpoint.close(0u32.into(), b"test complete");
     server_task.abort();

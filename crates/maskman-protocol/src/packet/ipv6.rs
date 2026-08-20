@@ -15,6 +15,17 @@ pub struct Ipv6Packet<'a> {
 
 impl<'a> Ipv6Packet<'a> {
     pub fn parse(input: &'a [u8]) -> Result<Self, PacketError> {
+        let packet = Self::parse_prefix(input)?;
+        if packet.total_len != input.len() {
+            return Err(PacketError::LengthMismatch {
+                declared: packet.total_len,
+                actual: input.len(),
+            });
+        }
+        Ok(packet)
+    }
+
+    pub fn parse_prefix(input: &'a [u8]) -> Result<Self, PacketError> {
         if input.len() < 40 {
             return Err(PacketError::Truncated { needed: 40, available: input.len() });
         }
@@ -25,9 +36,7 @@ impl<'a> Ipv6Packet<'a> {
         let total_len = 40usize
             .checked_add(payload_length)
             .ok_or(PacketError::LengthMismatch { declared: usize::MAX, actual: input.len() })?;
-        if total_len != input.len() {
-            return Err(PacketError::LengthMismatch { declared: total_len, actual: input.len() });
-        }
+        let available = input.len().min(total_len);
         let mut offset = 40;
         let mut next_header = input[6];
         let mut extension_count = 0;
@@ -41,7 +50,7 @@ impl<'a> Ipv6Packet<'a> {
             }
             let length = extension_length(next_header, input, offset)?;
             let end = offset.checked_add(length).ok_or(PacketError::InvalidExtensionLength)?;
-            if end > total_len || length == 0 {
+            if end > available || length == 0 {
                 return Err(PacketError::InvalidExtensionLength);
             }
             if next_header == 44 {
@@ -55,7 +64,7 @@ impl<'a> Ipv6Packet<'a> {
             extension_count += 1;
         }
         Ok(Self {
-            bytes: input,
+            bytes: &input[..available],
             header_len: offset,
             total_len,
             protocol: next_header,

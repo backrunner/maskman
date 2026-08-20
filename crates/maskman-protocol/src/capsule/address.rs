@@ -36,6 +36,8 @@ pub enum AddressError {
     ZeroRequestId,
     #[error("ADDRESS_REQUEST request ID {0} is repeated")]
     DuplicateRequestId(u64),
+    #[error("address capsule contains too many entries")]
+    TooManyEntries,
     #[error("ADDRESS_REQUEST capsule must contain at least one address")]
     EmptyRequest,
     #[error("address capsule contains trailing bytes")]
@@ -68,6 +70,9 @@ pub fn decode_address_assign(value: &[u8]) -> Result<Vec<AssignedAddress>, Addre
         let (prefix, consumed) = decode_prefix(value, offset)?;
         offset += consumed;
         entries.push(AssignedAddress { request_id, prefix });
+        if entries.len() > 256 {
+            return Err(AddressError::TooManyEntries);
+        }
     }
     Ok(entries)
 }
@@ -88,6 +93,9 @@ pub fn decode_address_request(value: &[u8]) -> Result<Vec<RequestedAddress>, Add
         let (prefix, consumed) = decode_prefix(value, offset)?;
         offset += consumed;
         entries.push(RequestedAddress { request_id, prefix });
+        if entries.len() > 256 {
+            return Err(AddressError::TooManyEntries);
+        }
     }
     if entries.is_empty() {
         return Err(AddressError::EmptyRequest);
@@ -126,7 +134,12 @@ where
     I: IntoIterator<Item = (u64, &'a IpNet)>,
 {
     let mut encoded = [0; 8];
+    let mut count = 0;
     for (request_id, prefix) in entries {
+        count += 1;
+        if count > 256 {
+            return Err(AddressError::TooManyEntries);
+        }
         let length = varint::encode(request_id, &mut encoded)?;
         output.extend_from_slice(&encoded[..length]);
         encode_prefix(prefix, output)?;

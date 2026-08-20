@@ -11,6 +11,17 @@ pub struct Ipv4Packet<'a> {
 
 impl<'a> Ipv4Packet<'a> {
     pub fn parse(input: &'a [u8]) -> Result<Self, PacketError> {
+        let packet = Self::parse_prefix(input)?;
+        if packet.total_len != input.len() {
+            return Err(PacketError::LengthMismatch {
+                declared: packet.total_len,
+                actual: input.len(),
+            });
+        }
+        Ok(packet)
+    }
+
+    pub fn parse_prefix(input: &'a [u8]) -> Result<Self, PacketError> {
         if input.len() < 20 {
             return Err(PacketError::Truncated { needed: 20, available: input.len() });
         }
@@ -25,13 +36,10 @@ impl<'a> Ipv4Packet<'a> {
         if total_len < header_len {
             return Err(PacketError::LengthMismatch { declared: total_len, actual: input.len() });
         }
-        if total_len != input.len() {
-            return Err(PacketError::LengthMismatch { declared: total_len, actual: input.len() });
-        }
         if header_checksum(&input[..header_len]) != 0 {
             return Err(PacketError::InvalidChecksum);
         }
-        Ok(Self { bytes: input, header_len, total_len })
+        Ok(Self { bytes: &input[..input.len().min(total_len)], header_len, total_len })
     }
 
     pub fn source(self) -> Ipv4Addr {

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::HashSet,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::{Arc, Mutex},
 };
@@ -8,19 +8,22 @@ use bytes::Bytes;
 use ipnet::IpNet;
 use maskman_protocol::{
     capsule::{
-        decode_route_advertisement, encode_address_assign, AddressError, AssignedAddress,
-        RequestedAddress, RouteAdvertisement, RouteError,
+        decode_address_assign, decode_route_advertisement, encode_address_assign, AddressError,
+        AssignedAddress, RequestedAddress, RouteAdvertisement, RouteError,
     },
-    connect::{IpProtocolScope, IpScope, IpTarget},
-    packet::{decrement_hop_limit, PacketView},
+    packet::{build_icmp_error, decrement_hop_limit, is_icmp_protocol, IcmpErrorKind, PacketView},
 };
 use thiserror::Error;
 use tokio::sync::mpsc;
 
 use super::address_pool::{AddressLeaseSet, AddressPoolSet};
+pub use super::ip_registry::IpSessionRegistry;
+use super::ip_scope::AuthorizedIpScope;
 use crate::policy::{EffectivePolicy, PolicyError};
 
 const QUEUE_CAPACITY: usize = 64;
+const MAX_SESSION_ROUTES: usize = 256;
+const MAX_ADDRESS_REQUESTS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpDropReason {
@@ -42,14 +45,24 @@ pub enum IpControlError {
     Route(#[from] RouteError),
     #[error("route is outside the session policy")]
     Policy,
+    #[error("route advertisement exceeds the per-session limit")]
+    RouteLimit,
+    #[error("route advertisement conflicts with another session")]
+    RouteConflict,
+    #[error("the global route registry is full")]
+    RouteCapacity,
+    #[error("IP session no longer exists")]
+    SessionClosed,
 }
 
 #[derive(Clone)]
 pub struct IpSessionHandle {
     assigned: Arc<Vec<IpNet>>,
-    scope: IpScope,
+    scope: AuthorizedIpScope,
     policy: Arc<EffectivePolicy>,
     routes: Arc<Mutex<RouteAdvertisement>>,
+    peer_assignments: Arc<Mutex<Vec<IpNet>>>,
+    request_ids: Arc<Mutex<HashSet<u64>>>,
     to_tun: mpsc::Sender<Bytes>,
     to_client: mpsc::Sender<Bytes>,
     ingress_limiter: Arc<Mutex<TokenBucket>>,
@@ -65,7 +78,7 @@ pub struct IpSession {
 
 impl IpSession {
     pub fn start(
-        scope: IpScope,
+        scope: AuthorizedIpScope,
         pools: &AddressPoolSet,
         policy: Arc<EffectivePolicy>,
         mtu: usize,
@@ -74,6 +87,9 @@ impl IpSession {
         let lease = pools.lease()?;
         let assigned = Arc::new(lease.prefixes().collect::<Vec<_>>());
         if assigned.is_empty() {
+            return None;
+        }
+        if !scope.has_compatible_assignment(&assigned) {
             return None;
         }
         let (to_client, to_client_rx) = mpsc::channel(QUEUE_CAPACITY);
@@ -90,6 +106,8 @@ impl IpSession {
             ))),
             policy,
             routes: Arc::new(Mutex::new(RouteAdvertisement::default())),
+            peer_assignments: Arc::new(Mutex::new(Vec::new())),
+            request_ids: Arc::new(Mutex::new(HashSet::new())),
             to_tun,
             to_client,
             mtu,
@@ -103,20 +121,37 @@ impl IpSessionHandle {
         &self.assigned
     }
 
+    pub fn supports_ipv6(&self) -> bool {
+        self.assigned.iter().any(|prefix| matches!(prefix, IpNet::V6(_)))
+    }
+
     pub fn try_send(&self, payload: Bytes) -> Result<(), IpDropReason> {
-        let mut packet = payload.to_vec();
-        self.validate(&packet, false)?;
-        if !allow(&self.ingress_limiter, packet.len()) {
+        if let Err(reason) = self.validate(&payload, false) {
+            self.enqueue_forwarding_error(&payload, reason);
+            return Err(reason);
+        }
+        if !allow(&self.ingress_limiter, payload.len()) {
             return Err(IpDropReason::Rate);
         }
-        decrement_hop_limit(&mut packet).map_err(|_| IpDropReason::HopLimit)?;
-        self.to_tun.try_send(Bytes::from(packet)).map_err(|_| IpDropReason::Queue)
+        // Decapsulation does not decrement TTL/Hop Limit.  The packet is
+        // still traversing the client-side link and the decrement happens
+        // only when this endpoint later encapsulates it for the peer.
+        self.to_tun.try_send(payload).map_err(|_| IpDropReason::Queue)
     }
 
     pub fn try_send_from_tun(&self, payload: Bytes) -> Result<(), IpDropReason> {
         self.validate(&payload, true)?;
         if !allow(&self.egress_limiter, payload.len()) {
             return Err(IpDropReason::Rate);
+        }
+        let mut packet = payload.to_vec();
+        decrement_hop_limit(&mut packet).map_err(|_| IpDropReason::HopLimit)?;
+        self.to_client.try_send(Bytes::from(packet)).map_err(|_| IpDropReason::Queue)
+    }
+
+    pub fn try_send_generated(&self, payload: Bytes) -> Result<(), IpDropReason> {
+        if payload.is_empty() || payload.len() > self.mtu {
+            return Err(IpDropReason::Oversized);
         }
         self.to_client.try_send(payload).map_err(|_| IpDropReason::Queue)
     }
@@ -134,6 +169,16 @@ impl IpSessionHandle {
         &self,
         requests: &[RequestedAddress],
     ) -> Result<Vec<u8>, AddressError> {
+        if requests.len() > MAX_ADDRESS_REQUESTS {
+            return Err(AddressError::TooManyEntries);
+        }
+        let mut request_ids =
+            self.request_ids.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(request) =
+            requests.iter().find(|request| request_ids.contains(&request.request_id))
+        {
+            return Err(AddressError::DuplicateRequestId(request.request_id));
+        }
         let mut used = vec![false; self.assigned.len()];
         let mut entries = Vec::with_capacity(requests.len() + self.assigned.len());
         for request in requests {
@@ -159,11 +204,43 @@ impl IpSessionHandle {
                 .filter(|(index, _)| !used[*index])
                 .map(|(_, prefix)| AssignedAddress { request_id: 0, prefix: *prefix }),
         );
-        encode_assignments(&entries)
+        let encoded = encode_assignments(&entries)?;
+        request_ids.extend(requests.iter().map(|request| request.request_id));
+        Ok(encoded)
     }
 
-    pub fn replace_routes(&self, value: &[u8]) -> Result<(), IpControlError> {
+    pub fn route_advertisement(
+        &self,
+        configured: &[IpNet],
+    ) -> Result<RouteAdvertisement, RouteError> {
+        let advertisement = self.scope.advertisement(configured, self.assigned())?;
+        let ranges = advertisement
+            .ranges()
+            .iter()
+            .filter(|range| self.policy.authorize_destination_range(range.start, range.end).is_ok())
+            .cloned()
+            .collect();
+        RouteAdvertisement::new(ranges)
+    }
+
+    pub fn replace_peer_assignments(&self, value: &[u8]) -> Result<(), AddressError> {
+        let next: Vec<IpNet> =
+            decode_address_assign(value)?.into_iter().map(|assignment| assignment.prefix).collect();
+        if next.len() > MAX_SESSION_ROUTES {
+            return Err(AddressError::TooManyEntries);
+        }
+        *self.peer_assignments.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
+        Ok(())
+    }
+
+    pub(super) fn validate_routes(
+        &self,
+        value: &[u8],
+    ) -> Result<RouteAdvertisement, IpControlError> {
         let next = decode_route_advertisement(value)?;
+        if next.ranges().len() > MAX_SESSION_ROUTES {
+            return Err(IpControlError::RouteLimit);
+        }
         for range in next.ranges() {
             if range.protocol != 0 {
                 self.policy
@@ -171,14 +248,14 @@ impl IpSessionHandle {
                     .map_err(|_: PolicyError| IpControlError::Policy)?;
             }
             self.policy
-                .authorize_destination(range.start)
-                .map_err(|_: PolicyError| IpControlError::Policy)?;
-            self.policy
-                .authorize_destination(range.end)
+                .authorize_destination_range(range.start, range.end)
                 .map_err(|_: PolicyError| IpControlError::Policy)?;
         }
+        Ok(next)
+    }
+
+    pub(super) fn commit_routes(&self, next: RouteAdvertisement) {
         *self.routes.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = next;
-        Ok(())
     }
 
     fn validate(&self, payload: &[u8], reverse: bool) -> Result<(), IpDropReason> {
@@ -189,45 +266,101 @@ impl IpSessionHandle {
         if view.total_len() != payload.len() {
             return Err(IpDropReason::Malformed);
         }
-        let source = view.source();
-        let destination = view.destination();
-        let protocol = view.protocol();
         if reverse {
-            if !self.assigned.iter().any(|prefix| prefix.contains(&destination)) {
-                return Err(IpDropReason::Destination);
-            }
-            if !scope_matches(&self.scope.target, source)
-                || self.policy.authorize_destination(source).is_err()
-            {
-                return Err(IpDropReason::Source);
-            }
+            self.validate_from_tun(view)?;
         } else {
-            if !self.assigned.iter().any(|prefix| prefix.contains(&source)) {
-                return Err(IpDropReason::Source);
-            }
-            if !scope_matches(&self.scope.target, destination)
-                || self.policy.authorize_destination(destination).is_err()
-            {
-                return Err(IpDropReason::Destination);
-            }
+            self.validate_from_client(view)?;
         }
-        if !scope_protocol_matches(self.scope.protocol, protocol)
-            || self.policy.authorize_ip_protocol(protocol).is_err()
-        {
-            return Err(IpDropReason::Protocol);
+        Ok(())
+    }
+
+    fn enqueue_forwarding_error(&self, payload: &[u8], reason: IpDropReason) {
+        let kind = match reason {
+            IpDropReason::Destination | IpDropReason::Protocol => IcmpErrorKind::NoRoute,
+            IpDropReason::Source => IcmpErrorKind::SourcePolicy,
+            IpDropReason::Oversized => IcmpErrorKind::PacketTooBig { mtu: self.mtu as u32 },
+            IpDropReason::HopLimit => IcmpErrorKind::HopLimit,
+            _ => return,
+        };
+        let Ok(view) = PacketView::parse_prefix(payload) else { return };
+        if !self.assigned.iter().any(|prefix| prefix.contains(&view.source())) {
+            return;
         }
-        let routes = self.routes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let route_address = if reverse { source } else { destination };
-        if !routes.ranges().is_empty()
-            && !routes.ranges().iter().any(|range| {
-                range.start <= route_address
-                    && route_address <= range.end
-                    && (range.protocol == 0 || range.protocol == protocol)
-            })
+        let Some(source) = self
+            .assigned
+            .iter()
+            .find(|prefix| same_ip_family(prefix.network(), view.source()))
+            .map(|prefix| prefix.network())
+        else {
+            return;
+        };
+        let Ok(error) = build_icmp_error(payload, source, kind) else { return };
+        let _ = self.try_send_generated(Bytes::from(error));
+    }
+
+    fn validate_from_client(&self, view: PacketView<'_>) -> Result<(), IpDropReason> {
+        if !self.assigned.iter().any(|prefix| prefix.contains(&view.source())) {
+            return Err(IpDropReason::Source);
+        }
+        if !self.scope.destination_matches(view.destination())
+            || self.policy.authorize_destination(view.destination()).is_err()
         {
             return Err(IpDropReason::Destination);
         }
-        Ok(())
+        self.validate_protocol(view.protocol())
+    }
+
+    fn validate_from_tun(&self, view: PacketView<'_>) -> Result<(), IpDropReason> {
+        if !self.reverse_destination_matches(view.destination(), view.protocol()) {
+            return Err(IpDropReason::Destination);
+        }
+        if is_icmp_protocol(view.protocol()) {
+            if let Some(invoking) =
+                view.icmp_invoking_packet().map_err(|_| IpDropReason::Malformed)?
+            {
+                return self.validate_icmp_invocation(invoking);
+            }
+        }
+        if !self.scope.destination_matches(view.source())
+            || self.policy.authorize_destination(view.source()).is_err()
+        {
+            return Err(IpDropReason::Source);
+        }
+        self.validate_protocol(view.protocol())
+    }
+
+    fn validate_icmp_invocation(&self, invoking: PacketView<'_>) -> Result<(), IpDropReason> {
+        if !self.assigned.iter().any(|prefix| prefix.contains(&invoking.source())) {
+            return Err(IpDropReason::Source);
+        }
+        if !self.scope.destination_matches(invoking.destination())
+            || self.policy.authorize_destination(invoking.destination()).is_err()
+        {
+            return Err(IpDropReason::Destination);
+        }
+        self.validate_protocol(invoking.protocol())
+    }
+
+    fn validate_protocol(&self, protocol: u8) -> Result<(), IpDropReason> {
+        if self.scope.protocol_matches(protocol)
+            && self.policy.authorize_ip_protocol(protocol).is_ok()
+        {
+            Ok(())
+        } else {
+            Err(IpDropReason::Protocol)
+        }
+    }
+
+    fn reverse_destination_matches(&self, destination: IpAddr, protocol: u8) -> bool {
+        if self.assigned.iter().any(|prefix| prefix.contains(&destination)) {
+            return true;
+        }
+        self.routes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .ranges()
+            .iter()
+            .any(|route| route.permits(destination, protocol))
     }
 }
 
@@ -260,6 +393,10 @@ fn same_family(left: IpNet, right: IpNet) -> bool {
     matches!((left, right), (IpNet::V4(_), IpNet::V4(_)) | (IpNet::V6(_), IpNet::V6(_)))
 }
 
+fn same_ip_family(left: IpAddr, right: IpAddr) -> bool {
+    matches!((left, right), (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_)))
+}
+
 fn rejected_assignment(requested: IpNet) -> IpNet {
     match requested {
         IpNet::V4(_) => IpNet::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 32)
@@ -267,93 +404,6 @@ fn rejected_assignment(requested: IpNet) -> IpNet {
         IpNet::V6(_) => IpNet::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 128)
             .unwrap_or_else(|_| unreachable!("an IPv6 host prefix is valid")),
     }
-}
-
-#[derive(Default)]
-pub struct IpSessionRegistry {
-    state: Mutex<IpRegistryState>,
-}
-
-#[derive(Default)]
-struct IpRegistryState {
-    streams: HashMap<SessionKey, IpSessionHandle>,
-    addresses: HashMap<IpAddr, SessionKey>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct SessionKey {
-    connection_id: u64,
-    stream_id: u64,
-}
-
-impl IpSessionRegistry {
-    pub fn insert(&self, connection_id: u64, stream_id: u64, session: IpSessionHandle) -> bool {
-        let key = SessionKey { connection_id, stream_id };
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.streams.contains_key(&key)
-            || session
-                .assigned
-                .iter()
-                .any(|address| state.addresses.contains_key(&address.network()))
-        {
-            return false;
-        }
-        for address in session.assigned.iter().map(|prefix| prefix.network()) {
-            state.addresses.insert(address, key);
-        }
-        state.streams.insert(key, session);
-        true
-    }
-
-    pub fn remove(&self, connection_id: u64, stream_id: u64) -> Option<IpSessionHandle> {
-        let key = SessionKey { connection_id, stream_id };
-        let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let session = state.streams.remove(&key)?;
-        state.addresses.retain(|_, value| *value != key);
-        Some(session)
-    }
-
-    pub fn try_send(
-        &self,
-        connection_id: u64,
-        stream_id: u64,
-        payload: Bytes,
-    ) -> Result<(), IpDropReason> {
-        let key = SessionKey { connection_id, stream_id };
-        let session = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .streams
-            .get(&key)
-            .cloned()
-            .ok_or(IpDropReason::Destination)?;
-        session.try_send(payload)
-    }
-
-    pub fn dispatch_tun(&self, payload: Bytes) -> Result<(), IpDropReason> {
-        let destination =
-            PacketView::parse(&payload).map_err(|_| IpDropReason::Malformed)?.destination();
-        let session = {
-            let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            let key = state.addresses.get(&destination).ok_or(IpDropReason::Destination)?;
-            state.streams.get(key).cloned().ok_or(IpDropReason::Destination)?
-        };
-        session.try_send_from_tun(payload)
-    }
-}
-
-fn scope_matches(target: &IpTarget, address: IpAddr) -> bool {
-    match target {
-        IpTarget::Any => true,
-        IpTarget::Prefix(prefix) => prefix.contains(&address),
-        IpTarget::Name(_) => false,
-    }
-}
-
-fn scope_protocol_matches(scope: IpProtocolScope, protocol: u8) -> bool {
-    matches!(scope, IpProtocolScope::Any)
-        || matches!(scope, IpProtocolScope::Number(value) if value == protocol)
 }
 
 fn allow(bucket: &Arc<Mutex<TokenBucket>>, amount: usize) -> bool {

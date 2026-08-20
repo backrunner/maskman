@@ -2,11 +2,33 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use thiserror::Error;
 
+use crate::packet::is_icmp_protocol;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddressRange {
     pub start: IpAddr,
     pub end: IpAddr,
     pub protocol: u8,
+}
+
+impl AddressRange {
+    pub fn contains(&self, address: IpAddr) -> bool {
+        same_family(self.start, address) && self.start <= address && address <= self.end
+    }
+
+    pub fn permits(&self, address: IpAddr, protocol: u8) -> bool {
+        self.contains(address)
+            && (self.protocol == 0 || self.protocol == protocol || is_icmp_protocol(protocol))
+    }
+
+    pub fn overlaps(&self, other: &Self) -> bool {
+        same_family(self.start, other.start) && self.start <= other.end && other.start <= self.end
+    }
+
+    pub fn conflicts_with(&self, other: &Self) -> bool {
+        self.overlaps(other)
+            && (self.protocol == 0 || other.protocol == 0 || self.protocol == other.protocol)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -222,5 +244,23 @@ mod tests {
         let empty =
             decode_route_advertisement(&[]).unwrap_or_else(|error| panic!("decode empty: {error}"));
         assert!(empty.ranges().is_empty());
+    }
+
+    #[test]
+    fn scoped_routes_always_permit_icmp() {
+        let route = range("192.0.2.0", "192.0.2.255", 17);
+        let destination = "192.0.2.42".parse().unwrap_or_else(|error| panic!("parse IP: {error}"));
+        assert!(route.permits(destination, 17));
+        assert!(route.permits(destination, 1));
+        assert!(route.permits(destination, 58));
+        assert!(!route.permits(destination, 6));
+    }
+
+    #[test]
+    fn different_protocol_routes_can_share_an_address_range() {
+        let first = range("192.0.2.0", "192.0.2.255", 6);
+        let second = range("192.0.2.0", "192.0.2.255", 17);
+        assert!(first.overlaps(&second));
+        assert!(!first.conflicts_with(&second));
     }
 }

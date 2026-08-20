@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use crate::{
     auth::Authenticator,
     datagram, policy,
-    proxy::ip,
+    proxy::{ip, resolver},
     request::{self, RequestContext, RequestError},
     session::QuotaState,
 };
@@ -40,7 +40,7 @@ pub async fn handle(
         )
         .await;
     }
-    let scope = match parse_ip_path(request.uri().path(), &context.config.base_path) {
+    let parsed_scope = match parse_ip_path(request.uri().path(), &context.config.base_path) {
         Ok(scope) => scope,
         Err(_) => {
             return request::reject(
@@ -61,7 +61,7 @@ pub async fn handle(
     if let Err(error) = policy.authorize_capability("connect-ip") {
         return request::reject_policy(stream, error).await;
     }
-    if let IpProtocolScope::Number(protocol) = scope.protocol {
+    if let IpProtocolScope::Number(protocol) = parsed_scope.protocol {
         if policy.authorize_ip_protocol(protocol).is_err() {
             return request::reject(
                 stream,
@@ -71,6 +71,10 @@ pub async fn handle(
             .await;
         }
     }
+    let scope = match resolver::resolve_ip_scope(parsed_scope, &policy).await {
+        Ok(scope) => scope,
+        Err(error) => return request::reject_resolver(stream, error).await,
+    };
     let Some(quota) = QuotaState::acquire(
         context.quotas.clone(),
         &principal.id,
@@ -111,20 +115,30 @@ pub async fn handle(
         .await;
     }
     let result = async {
+        ensure_ipv6_capacity(&context.connection, stream_id, &session.handle)?;
         let assigned = session.handle.initial_assignment_capsule()?;
         stream
             .send_response(request::response(StatusCode::OK, true))
             .await
             .map_err(RequestError::Response)?;
         send_capsule(&mut stream, capsule::ADDRESS_ASSIGN_CAPSULE, assigned).await?;
-        if let Some(routes) = configured_route_capsule(&context.config.ip.advertise_routes) {
-            send_capsule(&mut stream, capsule::ROUTE_ADVERTISEMENT_CAPSULE, routes).await?;
+        let routes = session
+            .handle
+            .route_advertisement(&context.config.ip.advertise_routes)
+            .map_err(ip::IpControlError::from)?;
+        if !routes.ranges().is_empty() {
+            let mut encoded = Vec::new();
+            capsule::encode_route_advertisement(&routes, &mut encoded)
+                .map_err(ip::IpControlError::from)?;
+            send_capsule(&mut stream, capsule::ROUTE_ADVERTISEMENT_CAPSULE, encoded).await?;
         }
         drive_stream(
             &mut stream,
             &session.handle,
             &mut session.to_client,
+            &context.ip_registry,
             context.connection.clone(),
+            context.connection_id,
             stream_id,
         )
         .await
@@ -143,7 +157,9 @@ async fn drive_stream(
     stream: &mut h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     session: &ip::IpSessionHandle,
     to_client: &mut mpsc::Receiver<Bytes>,
+    registry: &ip::IpSessionRegistry,
     connection: quinn::Connection,
+    connection_id: u64,
     stream_id: u64,
 ) -> Result<(), RequestError> {
     let mut decoder = Decoder::new(CapsuleLimits::uniform(MAX_CAPSULE_VALUE_BYTES));
@@ -155,7 +171,15 @@ async fn drive_stream(
                     let length = chunk.len();
                     for event in decoder.push(chunk)? {
                         if let DecodeEvent::Capsule(value) = event {
-                            handle_capsule(value, session, stream).await?;
+                            handle_capsule(
+                                value,
+                                session,
+                                registry,
+                                connection_id,
+                                stream_id,
+                                stream,
+                            )
+                            .await?;
                         }
                     }
                     data.advance(length);
@@ -177,6 +201,9 @@ async fn drive_stream(
 async fn handle_capsule(
     capsule: Capsule,
     session: &ip::IpSessionHandle,
+    registry: &ip::IpSessionRegistry,
+    connection_id: u64,
+    stream_id: u64,
     stream: &mut h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
 ) -> Result<(), RequestError> {
     match capsule.capsule_type {
@@ -192,10 +219,10 @@ async fn handle_capsule(
             send_capsule(stream, capsule::ADDRESS_ASSIGN_CAPSULE, assignment).await?;
         }
         capsule::ROUTE_ADVERTISEMENT_CAPSULE => {
-            session.replace_routes(&capsule.value)?;
+            registry.replace_routes(connection_id, stream_id, &capsule.value)?;
         }
         capsule::ADDRESS_ASSIGN_CAPSULE => {
-            let _ = capsule::decode_address_assign(&capsule.value)?;
+            session.replace_peer_assignments(&capsule.value)?;
         }
         _ => {}
     }
@@ -213,7 +240,8 @@ async fn send_ip_packet(
     let encoded = datagram::encode(stream_id, Bytes::from(http_payload.clone()))
         .map_err(|error| RequestError::Datagram(error.to_string()))?;
     match connection.send_datagram(encoded) {
-        Ok(()) | Err(quinn::SendDatagramError::TooLarge) => Ok(()),
+        Ok(()) => Ok(()),
+        Err(quinn::SendDatagramError::TooLarge) => Err(RequestError::DatagramTooLarge),
         Err(quinn::SendDatagramError::UnsupportedByPeer | quinn::SendDatagramError::Disabled) => {
             send_capsule(stream, capsule::DATAGRAM_CAPSULE, http_payload).await
         }
@@ -221,6 +249,28 @@ async fn send_ip_packet(
             Err(RequestError::Datagram(error.to_string()))
         }
     }
+}
+
+fn ensure_ipv6_capacity(
+    connection: &quinn::Connection,
+    stream_id: u64,
+    session: &ip::IpSessionHandle,
+) -> Result<(), RequestError> {
+    if !session.supports_ipv6() {
+        return Ok(());
+    }
+    let Some(max_datagram_size) = connection.max_datagram_size() else {
+        return Ok(());
+    };
+    let mut http_payload = Vec::with_capacity(1281);
+    capsule::encode_datagram(0, &[0u8; 1_280], &mut http_payload)
+        .map_err(RequestError::DatagramPayload)?;
+    let encoded = datagram::encode(stream_id, Bytes::from(http_payload))
+        .map_err(|error| RequestError::Datagram(error.to_string()))?;
+    if encoded.len() > max_datagram_size {
+        return Err(RequestError::DatagramTooSmall);
+    }
+    Ok(())
 }
 
 async fn send_capsule(
@@ -231,24 +281,6 @@ async fn send_capsule(
     let mut encoded = Vec::with_capacity(value.len() + 16);
     capsule::encode(&Capsule { capsule_type, value }, &mut encoded)?;
     stream.send_data(Bytes::from(encoded)).await.map_err(RequestError::Response)
-}
-
-fn configured_route_capsule(routes: &[ipnet::IpNet]) -> Option<Vec<u8>> {
-    if routes.is_empty() {
-        return None;
-    }
-    let ranges = routes
-        .iter()
-        .map(|route| maskman_protocol::capsule::AddressRange {
-            start: route.network(),
-            end: route.broadcast(),
-            protocol: 0,
-        })
-        .collect::<Vec<_>>();
-    let advertisement = maskman_protocol::capsule::RouteAdvertisement::new(ranges).ok()?;
-    let mut encoded = Vec::new();
-    capsule::encode_route_advertisement(&advertisement, &mut encoded).ok()?;
-    Some(encoded)
 }
 
 fn is_connect_ip(request: &Request<()>) -> bool {

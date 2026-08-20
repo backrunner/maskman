@@ -18,10 +18,10 @@ Each IP session receives host-prefix assignments from the configured IPv4 and/or
 IPv6 pools. Leases are released with the request lifecycle and a destination
 registry prevents two sessions from owning the same assigned address. Outbound
 packets must use an assigned source, match the URI target scope and principal
-destination policy, and use an allowed protocol. IPv4 TTL and IPv6 Hop Limit
-are decremented exactly once before the packet enters the TUN boundary. Reverse
-packets are looked up by assigned destination and are validated again before
-being sent to the client.
+destination policy, and use an allowed protocol. Client-to-TUN decapsulation
+preserves IPv4 TTL and IPv6 Hop Limit; reverse packets are decremented exactly
+once immediately before HTTP Datagram encapsulation. Locally generated ICMP
+errors bypass that decrement because they are not forwarded packets.
 
 The transport context exposes one bounded TUN ingress queue and a
 dispatch_tun_packet boundary. tun_bridge is the only server-side adapter
@@ -43,8 +43,13 @@ cargo check --workspace --all-targets                  passed
 
 The HTTP/3 integration test authenticates CONNECT-IP, parses the
 ADDRESS_ASSIGN capsule, sends an IPv4 packet over QUIC DATAGRAM, verifies the
-packet reaches the TUN queue with TTL 63, injects a reverse packet through the
-TUN boundary, and verifies it returns on the same request stream.
+packet reaches the TUN queue with its original TTL, injects a reverse packet
+through the TUN boundary, and verifies it returns on the same request stream
+with one TTL decrement.
+
+The protocol layer also bounds ADDRESS_REQUEST IDs and route tables, rejects
+literal prefixes that have no policy intersection before leasing resources,
+and emits bounded IPv4/IPv6 ICMP errors for policy and routing failures.
 
 Privileged Linux namespace, nftables/NAT, ICMP Packet Too Big generation, and
 macOS utun route smoke tests remain M4/M5 release gates. The current platform

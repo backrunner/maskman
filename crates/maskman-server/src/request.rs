@@ -64,6 +64,10 @@ pub enum RequestError {
     IpControl(#[from] IpControlError),
     #[error("failed to send QUIC datagram: {0}")]
     Datagram(String),
+    #[error("QUIC datagram is too small for the configured IP tunnel MTU")]
+    DatagramTooSmall,
+    #[error("QUIC datagram cannot carry the IP packet")]
+    DatagramTooLarge,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -352,7 +356,7 @@ pub(crate) async fn reject_policy(
     reject(stream, StatusCode::FORBIDDEN, proxy_error).await
 }
 
-async fn reject_resolver(
+pub(crate) async fn reject_resolver(
     stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     error: resolver::ResolveError,
 ) -> Result<(), RequestError> {
