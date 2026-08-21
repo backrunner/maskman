@@ -70,13 +70,22 @@ impl Authenticator {
         let Some(encoded) = encoded.strip_prefix("mm_") else {
             return Err(AuthError::Invalid);
         };
-        let Some((token_id, secret)) = encoded.split_once('_') else {
-            return Err(AuthError::Invalid);
-        };
-        if token_id.is_empty() || secret.is_empty() || secret.len() > 512 {
-            return Err(AuthError::Invalid);
-        }
-        let token = self.config.token_principals.get(token_id).ok_or(AuthError::Invalid)?;
+        // The ID may contain underscores and the base64url secret may contain
+        // underscores too. Match a configured ID prefix instead of splitting
+        // at an attacker-controlled delimiter; longest wins for nested IDs.
+        let (_token_id, secret, token) = self
+            .config
+            .token_principals
+            .iter()
+            .filter_map(|(token_id, token)| {
+                encoded
+                    .strip_prefix(token_id.as_str())
+                    .and_then(|suffix| suffix.strip_prefix('_'))
+                    .filter(|secret| !secret.is_empty() && secret.len() <= 512)
+                    .map(|secret| (token_id.as_str(), secret, token))
+            })
+            .max_by_key(|(token_id, _, _)| token_id.len())
+            .ok_or(AuthError::Invalid)?;
         let digest = Sha256::digest(secret.as_bytes());
         if digest.as_slice().ct_eq(&token.secret_sha256).unwrap_u8() != 1 {
             return Err(AuthError::Invalid);
@@ -109,8 +118,12 @@ mod tests {
 
     use super::{AuthError, Authenticator};
 
-    fn auth(expires_at: Option<&str>) -> Authenticator {
-        let secret = Sha256::digest(b"secret");
+    fn auth_with_token(
+        token_id: &str,
+        secret_value: &str,
+        expires_at: Option<&str>,
+    ) -> Authenticator {
+        let secret = Sha256::digest(secret_value.as_bytes());
         let digest = secret.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
         let mut document = ConfigDocument::default();
         document.auth.principals.push(maskman_config::model::PrincipalConfig {
@@ -119,7 +132,7 @@ mod tests {
             certificate_sha256: Vec::new(),
         });
         document.auth.bearer_tokens.push(maskman_config::model::BearerTokenConfig {
-            id: "token".into(),
+            id: token_id.into(),
             principal: "client".into(),
             secret_sha256: digest,
             expires_at: expires_at.map(str::to_owned),
@@ -137,6 +150,10 @@ mod tests {
         let config = maskman_config::compile_document(&document, std::path::Path::new("."))
             .unwrap_or_else(|error| panic!("compile auth test config: {error}"));
         Authenticator::new(Arc::new(config))
+    }
+
+    fn auth(expires_at: Option<&str>) -> Authenticator {
+        auth_with_token("token", "secret", expires_at)
     }
 
     #[test]
@@ -167,5 +184,24 @@ mod tests {
             "Bearer mm_token_secret".parse().unwrap_or_else(|error| panic!("header: {error}")),
         );
         assert_eq!(authenticator.authenticate(&headers, None), Err(AuthError::Expired));
+    }
+
+    #[test]
+    fn token_ids_and_secrets_may_contain_underscores() {
+        let authenticator = auth_with_token("token_with", "secret_under_score", None);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            "Bearer mm_token_with_secret_under_score"
+                .parse()
+                .unwrap_or_else(|error| panic!("header: {error}")),
+        );
+        assert_eq!(
+            authenticator
+                .authenticate(&headers, None)
+                .unwrap_or_else(|error| panic!("authenticate: {error}"))
+                .id,
+            "client"
+        );
     }
 }

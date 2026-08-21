@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 mod compile;
 mod error;
 mod load;
@@ -52,14 +54,21 @@ pub fn load(path: &Path) -> Result<ConfigDocument, ConfigError> {
 pub fn compile(path: &Path) -> Result<CompiledConfig, ConfigError> {
     let document = load(path)?;
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
-    compile::compile(&document, base_dir)
+    compile_document(&document, base_dir)
 }
 
 pub fn compile_document(
     document: &ConfigDocument,
     base_dir: &Path,
 ) -> Result<CompiledConfig, ConfigError> {
-    compile::compile(document, base_dir)
+    let absolute_base = if base_dir.is_absolute() {
+        base_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| ConfigError::Read { path: base_dir.to_path_buf(), source })?
+            .join(base_dir)
+    };
+    compile::compile(document, &absolute_base)
 }
 
 #[cfg(test)]
@@ -113,7 +122,42 @@ mod tests {
         };
         assert_eq!(toml_loaded.schema_version, 1);
         assert_eq!(json_loaded.schema_version, 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&toml_path)
+                    .unwrap_or_else(|error| panic!("stat TOML: {error}"))
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_writer_rejects_a_broken_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "maskman-config-symlink-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let path = root.join("config.toml");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap_or_else(|error| panic!("create test root: {error}"));
+        symlink(root.join("missing.toml"), &path)
+            .unwrap_or_else(|error| panic!("create broken config symlink: {error}"));
+        assert!(write_atomic(&path, &ConfigDocument::default()).is_err());
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap_or_else(|error| panic!("inspect config symlink: {error}"))
+            .file_type()
+            .is_symlink());
+        std::fs::remove_dir_all(root).unwrap_or_else(|error| panic!("remove test root: {error}"));
     }
 
     #[test]
@@ -138,5 +182,44 @@ mod tests {
         assert!(matches!(validate(&document), Err(validate::ValidationError::UdpIdleTimeout)));
         document.proxy.udp.socket_idle_timeout = "2m".into();
         assert!(validate(&document).is_ok());
+    }
+
+    #[test]
+    fn metrics_listener_cannot_collide_with_quic_listener() {
+        let mut document = ConfigDocument::default();
+        document.observability.metrics_listen = document.server.listen[0].clone();
+        assert!(matches!(
+            validate(&document),
+            Err(crate::ValidationError::MetricsListenConflict(_))
+        ));
+    }
+
+    #[test]
+    fn managed_nat_requires_ip_and_owned_interface_shape() {
+        let mut document = ConfigDocument::default();
+        document.proxy.ip.nat.mode = crate::model::NatMode::Managed;
+        assert!(matches!(validate(&document), Err(crate::ValidationError::NatRequiresIp)));
+        document.proxy.ip.enabled = true;
+        document.proxy.ip.client_ipv4_pool = Some("100.64.0.0/10".into());
+        document.proxy.ip.interface_name = "unsafe;name".into();
+        assert!(matches!(validate(&document), Err(crate::ValidationError::InterfaceName(_))));
+    }
+
+    #[test]
+    fn client_address_pools_must_match_their_declared_family() {
+        let mut document = ConfigDocument::default();
+        document.proxy.ip.enabled = true;
+        document.proxy.ip.client_ipv4_pool = Some("fd42::/64".into());
+        assert!(matches!(
+            validate(&document),
+            Err(crate::ValidationError::IpPool { field: "proxy.ip.client_ipv4_pool", .. })
+        ));
+
+        document.proxy.ip.client_ipv4_pool = None;
+        document.proxy.ip.client_ipv6_pool = Some("100.64.0.0/10".into());
+        assert!(matches!(
+            validate(&document),
+            Err(crate::ValidationError::IpPool { field: "proxy.ip.client_ipv6_pool", .. })
+        ));
     }
 }

@@ -1,15 +1,16 @@
 # M8 质量与发布证据
 
 本文件区分本 checkout 已执行的本地验证、CI 中可重复的自动门禁和仍需
-目标环境的 release blocker。记录日期为 2026-08-20，基线提交为
-`dc02e4ae368f`，M8 改动尚未提交。
+目标环境的 release blocker。记录日期为 2026-08-22，基线提交为
+`c1885fb`；当前工作树包含 supervisor/worker、journal transaction 和
+平台 hardening 改动，尚未形成最终 release commit。
 
 ## 本地已验证
 
 | 项目 | 结果 |
 | --- | --- |
 | 格式与静态检查 | `cargo fmt --all -- --check`、ShellCheck、actionlint、shell syntax、workflow YAML 和 `git diff --check` 通过 |
-| Workspace | stable 与 Rust 1.88 clippy 通过；Rust 1.88 `cargo test --workspace --locked` 通过，共 89 tests |
+| Workspace | stable clippy 通过；`cargo test --workspace --locked --all-targets` 通过，共 132 tests |
 | 依赖 | `cargo deny check` 通过；`cargo audit` 仅保留已记录的 `paste` unmaintained allow；`cargo machete 0.9.2` 未发现 unused dependencies |
 | Compliance | `cargo xtask compliance` 通过，共 43 条 cumulative requirements |
 | Fuzz | 8 个 target 各完成 100,000 runs，`rss_limit_mb=1024`、`malloc_limit_mb=64`，无 crash |
@@ -42,14 +43,20 @@ artifact 已删除。随后全部 target 使用修订后的双重限制完成 10
 
 ## 未执行的 release blocker
 
-- 真实 Linux namespace 双栈 Maskman TUN forwarding；
+- 真实 Linux namespace 双栈 Maskman TUN forwarding 与 supervisor/worker target smoke；
 - macOS arm64 utun、route 和 pf 特权转发；
 - 独立 MASQUE client 与外部 mTLS 互操作；
 - 24 小时 mixed-traffic soak；
-- managed NAT backend；
+- 目标机 managed NAT 规则应用与回滚；
 - 生产 Ed25519 key、clean-host archive/signature/SBOM/provenance 验证；
 - setup -> install -> start -> status -> stop 完整记录；
 - clean-host update、checksum、signature、health-check 和 rollback 演练。
 
 任一 blocker 未完成时，GitHub release 必须保持 draft，README 不得标记 v1.0
 完成。
+
+本地新增验证包括 control socket 协议版本、0600 权限、过长路径、残留非
+socket 路径、原子 reload 拒绝、metrics endpoint、严格 journal 校验、nft/pf
+规则渲染、更新互斥锁、staged binary 超时，以及 development setup ->
+config validate -> foreground serve -> status --json -> Ctrl-C 生命周期。
+这些测试不能替代特权目标机和 clean-host release 证据。

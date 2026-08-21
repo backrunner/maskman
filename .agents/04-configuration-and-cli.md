@@ -22,7 +22,9 @@
 | binary | /usr/local/bin/maskman | /usr/local/bin/maskman |
 | service | maskman.service | top.backrunner.maskman |
 
-开发模式可通过 --config 指向任意可读文件，不自动写系统目录。
+开发模式可通过 --config 指向任意可读文件，不自动写系统目录；`setup
+--development` 默认把 `state_dir` 写为配置目录下的相对 `state/`，保证普通
+用户可以直接运行 `serve`。显式 `--state-dir` 仍按用户指定值写入。
 
 ## 2. 建议 TOML
 
@@ -210,7 +212,8 @@ setup 必须支持 --non-interactive、--format、--output 和完整 flags。缺
 1. 解析并验证 config。
 2. 展示 dry-run plan。
 3. 检查当前用户权限；不偷偷调用 sudo。
-4. 创建 system user、目录和权限。
+4. 幂等创建固定的 `maskman` system user/group、目录和权限；Linux 使用受限
+   `useradd` 参数，macOS 使用固定 `dscl` 记录，不经过 shell。
 5. 原子安装当前已签名 binary。
 6. 安装 hardening 后的 systemd unit 或 launchd plist。
 7. daemon-reload/bootstrap，并验证 service definition。
@@ -224,6 +227,7 @@ setup 必须支持 --non-interactive、--format、--output 和完整 flags。缺
 - stop：通过 service manager 请求优雅停止，支持 --timeout。
 - status：合并 installed/running PID、version、uptime、config hash、connections、UDP/IP sessions、packet drops 和最近错误。
 - status --json：稳定、无颜色、可供监控读取。
+- config migrate --dry-run：只报告 schema 迁移，不修改文件；实际迁移使用原子替换和严格验证。
 - reload：先本地 validate，再通过 control socket 原子 reload。
 
 ### serve

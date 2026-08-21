@@ -20,6 +20,7 @@ use super::address_pool::{AddressLeaseSet, AddressPoolSet};
 pub use super::ip_registry::IpSessionRegistry;
 use super::ip_scope::AuthorizedIpScope;
 use crate::policy::{EffectivePolicy, PolicyError};
+use crate::stats::RuntimeStats;
 
 const QUEUE_CAPACITY: usize = 64;
 const MAX_SESSION_ROUTES: usize = 256;
@@ -67,6 +68,7 @@ pub struct IpSessionHandle {
     to_client: mpsc::Sender<Bytes>,
     ingress_limiter: Arc<Mutex<TokenBucket>>,
     egress_limiter: Arc<Mutex<TokenBucket>>,
+    stats: Option<Arc<RuntimeStats>>,
     mtu: usize,
 }
 
@@ -77,12 +79,24 @@ pub struct IpSession {
 }
 
 impl IpSession {
+    #[cfg(test)]
     pub fn start(
         scope: AuthorizedIpScope,
         pools: &AddressPoolSet,
         policy: Arc<EffectivePolicy>,
         mtu: usize,
         to_tun: mpsc::Sender<Bytes>,
+    ) -> Option<Self> {
+        Self::start_with_stats(scope, pools, policy, mtu, to_tun, None)
+    }
+
+    pub fn start_with_stats(
+        scope: AuthorizedIpScope,
+        pools: &AddressPoolSet,
+        policy: Arc<EffectivePolicy>,
+        mtu: usize,
+        to_tun: mpsc::Sender<Bytes>,
+        stats: Option<Arc<RuntimeStats>>,
     ) -> Option<Self> {
         let lease = pools.lease()?;
         let assigned = Arc::new(lease.prefixes().collect::<Vec<_>>());
@@ -110,6 +124,7 @@ impl IpSession {
             request_ids: Arc::new(Mutex::new(HashSet::new())),
             to_tun,
             to_client,
+            stats,
             mtu,
         };
         Some(Self { handle, to_client: to_client_rx, _lease: lease })
@@ -126,6 +141,12 @@ impl IpSessionHandle {
     }
 
     pub fn try_send(&self, payload: Bytes) -> Result<(), IpDropReason> {
+        let result = self.try_send_inner(payload);
+        self.record_result(result.is_ok());
+        result
+    }
+
+    fn try_send_inner(&self, payload: Bytes) -> Result<(), IpDropReason> {
         if let Err(reason) = self.validate(&payload, false) {
             self.enqueue_forwarding_error(&payload, reason);
             return Err(reason);
@@ -140,6 +161,12 @@ impl IpSessionHandle {
     }
 
     pub fn try_send_from_tun(&self, payload: Bytes) -> Result<(), IpDropReason> {
+        let result = self.try_send_from_tun_inner(payload);
+        self.record_result(result.is_ok());
+        result
+    }
+
+    fn try_send_from_tun_inner(&self, payload: Bytes) -> Result<(), IpDropReason> {
         self.validate(&payload, true)?;
         if !allow(&self.egress_limiter, payload.len()) {
             return Err(IpDropReason::Rate);
@@ -150,10 +177,19 @@ impl IpSessionHandle {
     }
 
     pub fn try_send_generated(&self, payload: Bytes) -> Result<(), IpDropReason> {
-        if payload.is_empty() || payload.len() > self.mtu {
-            return Err(IpDropReason::Oversized);
+        let result = if payload.is_empty() || payload.len() > self.mtu {
+            Err(IpDropReason::Oversized)
+        } else {
+            self.to_client.try_send(payload).map_err(|_| IpDropReason::Queue)
+        };
+        self.record_result(result.is_ok());
+        result
+    }
+
+    fn record_result(&self, forwarded: bool) {
+        if let Some(stats) = &self.stats {
+            stats.packet_result(forwarded);
         }
-        self.to_client.try_send(payload).map_err(|_| IpDropReason::Queue)
     }
 
     pub fn initial_assignment_capsule(&self) -> Result<Vec<u8>, AddressError> {

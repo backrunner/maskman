@@ -46,6 +46,10 @@ pub enum ValidationError {
     HeaderLimit,
     #[error("duplicate {kind} id: {id}")]
     DuplicateId { kind: &'static str, id: String },
+    #[error("{kind} identifier is invalid: {id}")]
+    InvalidIdentifier { kind: &'static str, id: String },
+    #[error("certificate SHA-256 value is mapped to more than one principal: {digest}")]
+    DuplicateCertificateHash { digest: String },
     #[error("principal {principal} references missing role {role}")]
     MissingRole { principal: String, role: String },
     #[error("bearer token {token} references missing principal {principal}")]
@@ -58,6 +62,8 @@ pub enum ValidationError {
     MissingClientCa,
     #[error("mTLS authentication requires at least one principal certificate SHA-256 mapping")]
     MissingCertificatePrincipal,
+    #[error("auth.required=false is only valid with auth.mode=none")]
+    OptionalAuthenticationMode,
     #[error("bearer token {token} has an invalid expiry: {value}")]
     TokenExpiry { token: String, value: String },
     #[error("role {role} contains unsupported capability {capability}")]
@@ -74,6 +80,8 @@ pub enum ValidationError {
     UdpIdleTimeout,
     #[error("proxy.ip.mtu must be at least 1280 for IPv6-capable IP proxying")]
     IpMtu,
+    #[error("proxy.ip.interface_name is invalid: {0}")]
+    InterfaceName(String),
     #[error("proxy.ip pool {field} is invalid: {value}")]
     IpPool { field: &'static str, value: String },
     #[error("proxy.ip requires at least one client address pool when enabled")]
@@ -84,8 +92,14 @@ pub enum ValidationError {
     AdvertiseRoutes,
     #[error("proxy.ip.nat managed mode requires a non-empty egress_interface")]
     NatInterface,
+    #[error("proxy.ip.nat managed mode requires proxy.ip.enabled = true")]
+    NatRequiresIp,
+    #[error("proxy.ip.nat.egress_interface contains unsupported characters: {0}")]
+    NatInterfaceInvalid(String),
     #[error("observability.metrics_listen is invalid: {0}")]
     MetricsListen(String),
+    #[error("observability.metrics_listen must not overlap server.listen: {0}")]
+    MetricsListenConflict(String),
 }
 
 pub fn validate(document: &ConfigDocument) -> Result<(), ValidationError> {
@@ -108,6 +122,8 @@ pub fn validate(document: &ConfigDocument) -> Result<(), ValidationError> {
         || document.server.base_path.contains("//")
         || document.server.base_path.contains("%2f")
         || document.server.base_path.contains("%2F")
+        || document.server.base_path.split('/').any(|segment| segment == "." || segment == "..")
+        || document.server.base_path.to_ascii_lowercase().contains("%2e")
     {
         return Err(ValidationError::BasePath(document.server.base_path.clone()));
     }
@@ -134,9 +150,22 @@ pub fn validate(document: &ConfigDocument) -> Result<(), ValidationError> {
     validate_policy(document)?;
     validate_udp(document)?;
     validate_ip(document)?;
-    document.observability.metrics_listen.parse::<SocketAddr>().map_err(|_| {
+    let metrics = document.observability.metrics_listen.parse::<SocketAddr>().map_err(|_| {
         ValidationError::MetricsListen(document.observability.metrics_listen.clone())
     })?;
+    if metrics.port() == 0 {
+        return Err(ValidationError::MetricsListen(document.observability.metrics_listen.clone()));
+    }
+    if document.server.listen.iter().filter_map(|listen| listen.parse::<SocketAddr>().ok()).any(
+        |listen| {
+            listen.port() == metrics.port()
+                && (listen.ip().is_unspecified()
+                    || metrics.ip().is_unspecified()
+                    || listen.ip() == metrics.ip())
+        },
+    ) {
+        return Err(ValidationError::MetricsListenConflict(metrics.to_string()));
+    }
     Ok(())
 }
 
@@ -152,6 +181,7 @@ pub fn resolve_path(base: &Path, value: &str) -> std::path::PathBuf {
 fn validate_auth(document: &ConfigDocument) -> Result<(), ValidationError> {
     let mut principals = HashSet::new();
     for principal in &document.auth.principals {
+        validate_identifier(&principal.id, "principal")?;
         if !principals.insert(&principal.id) {
             return Err(ValidationError::DuplicateId {
                 kind: "principal",
@@ -167,6 +197,7 @@ fn validate_auth(document: &ConfigDocument) -> Result<(), ValidationError> {
     }
     let mut roles = HashSet::new();
     for role in &document.policy.roles {
+        validate_identifier(&role.name, "role")?;
         if !roles.insert(&role.name) {
             return Err(ValidationError::DuplicateId { kind: "role", id: role.name.clone() });
         }
@@ -182,7 +213,18 @@ fn validate_auth(document: &ConfigDocument) -> Result<(), ValidationError> {
         }
     }
     let mut tokens = HashSet::new();
+    let mut certificate_hashes = HashSet::new();
+    for principal in &document.auth.principals {
+        for digest in &principal.certificate_sha256 {
+            if !certificate_hashes.insert(digest.to_ascii_lowercase()) {
+                return Err(ValidationError::DuplicateCertificateHash {
+                    digest: digest.to_ascii_lowercase(),
+                });
+            }
+        }
+    }
     for token in &document.auth.bearer_tokens {
+        validate_identifier(&token.id, "bearer token")?;
         if !tokens.insert(&token.id) {
             return Err(ValidationError::DuplicateId {
                 kind: "bearer token",
@@ -211,7 +253,22 @@ fn validate_auth(document: &ConfigDocument) -> Result<(), ValidationError> {
     if document.auth.required && matches!(document.auth.mode, AuthMode::None) {
         return Err(ValidationError::EmptyField("auth.mode when auth.required is true"));
     }
+    if !document.auth.required && !matches!(document.auth.mode, AuthMode::None) {
+        return Err(ValidationError::OptionalAuthenticationMode);
+    }
     validate_mtls(document)
+}
+
+fn validate_identifier(value: &str, kind: &'static str) -> Result<(), ValidationError> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-._".contains(character))
+    {
+        return Err(ValidationError::InvalidIdentifier { kind, id: value.to_owned() });
+    }
+    Ok(())
 }
 
 fn validate_mtls(document: &ConfigDocument) -> Result<(), ValidationError> {
@@ -285,20 +342,44 @@ fn validate_policy(document: &ConfigDocument) -> Result<(), ValidationError> {
 
 fn validate_ip(document: &ConfigDocument) -> Result<(), ValidationError> {
     if !document.proxy.ip.enabled {
+        if matches!(document.proxy.ip.nat.mode, NatMode::Managed) {
+            return Err(ValidationError::NatRequiresIp);
+        }
         return Ok(());
+    }
+    let empty_name = document.proxy.ip.interface_name.is_empty();
+    let empty_name_invalid = !cfg!(target_os = "macos") && empty_name;
+    let mac_name_invalid = cfg!(target_os = "macos")
+        && !empty_name
+        && !document.proxy.ip.interface_name.starts_with("utun");
+    if empty_name_invalid
+        || document.proxy.ip.interface_name.len() > 15
+        || !document
+            .proxy
+            .ip
+            .interface_name
+            .chars()
+            .all(|value| value.is_ascii_alphanumeric() || matches!(value, '.' | '_' | '-'))
+        || (cfg!(target_os = "linux") && !document.proxy.ip.interface_name.starts_with("maskman"))
+        || mac_name_invalid
+    {
+        return Err(ValidationError::InterfaceName(document.proxy.ip.interface_name.clone()));
     }
     if document.proxy.ip.mtu < 1_280 {
         return Err(ValidationError::IpMtu);
     }
     let mut pools = Vec::new();
-    for (field, value) in [
-        ("proxy.ip.client_ipv4_pool", document.proxy.ip.client_ipv4_pool.as_deref()),
-        ("proxy.ip.client_ipv6_pool", document.proxy.ip.client_ipv6_pool.as_deref()),
+    for (field, value, expected_version) in [
+        ("proxy.ip.client_ipv4_pool", document.proxy.ip.client_ipv4_pool.as_deref(), 4),
+        ("proxy.ip.client_ipv6_pool", document.proxy.ip.client_ipv6_pool.as_deref(), 6),
     ] {
         if let Some(value) = value {
             let network = value
                 .parse::<IpNet>()
                 .map_err(|_| ValidationError::IpPool { field, value: value.to_owned() })?;
+            if ip_version(network.network()) != expected_version {
+                return Err(ValidationError::IpPool { field, value: value.to_owned() });
+            }
             pools.push((field, network));
         }
     }
@@ -319,6 +400,19 @@ fn validate_ip(document: &ConfigDocument) -> Result<(), ValidationError> {
         && document.proxy.ip.nat.egress_interface.trim().is_empty()
     {
         return Err(ValidationError::NatInterface);
+    }
+    if document.proxy.ip.nat.egress_interface != "auto"
+        && !document
+            .proxy
+            .ip
+            .nat
+            .egress_interface
+            .chars()
+            .all(|value| value.is_ascii_alphanumeric() || matches!(value, '.' | '_' | '-' | ':'))
+    {
+        return Err(ValidationError::NatInterfaceInvalid(
+            document.proxy.ip.nat.egress_interface.clone(),
+        ));
     }
     let routes = document
         .proxy

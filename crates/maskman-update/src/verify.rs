@@ -21,8 +21,11 @@ pub(crate) fn download_limited(
         .map_err(|error| UpdateError::Http(error.to_string()))?
         .error_for_status()
         .map_err(|error| UpdateError::Http(error.to_string()))?;
+    if response.url().scheme() != "https" {
+        return Err(UpdateError::Http("release asset redirect must remain on HTTPS".into()));
+    }
     reject_oversized(&response, limit)?;
-    read_response(&mut response, limit)
+    read_limited(&mut response, limit)
 }
 
 fn reject_oversized(response: &Response, limit: usize) -> Result<(), UpdateError> {
@@ -33,9 +36,9 @@ fn reject_oversized(response: &Response, limit: usize) -> Result<(), UpdateError
     }
 }
 
-fn read_response(response: &mut Response, limit: usize) -> Result<Vec<u8>, UpdateError> {
+fn read_limited(reader: &mut impl Read, limit: usize) -> Result<Vec<u8>, UpdateError> {
     let mut bytes = Vec::new();
-    response.read_to_end(&mut bytes).map_err(UpdateError::Io)?;
+    reader.take(limit.saturating_add(1) as u64).read_to_end(&mut bytes).map_err(UpdateError::Io)?;
     if bytes.len() > limit {
         return Err(UpdateError::DownloadTooLarge(limit));
     }
@@ -109,7 +112,8 @@ fn hex_digit(value: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{verify_checksum, verify_signature};
+    use super::{read_limited, verify_checksum, verify_signature};
+    use crate::UpdateError;
     use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
     use sha2::Digest;
 
@@ -128,5 +132,13 @@ mod tests {
         assert!(verify_checksum(archive, checksum.as_bytes()).is_ok());
         assert!(verify_signature(archive, &signature, &key).is_ok());
         assert!(verify_checksum(b"tampered", checksum.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn response_reader_stops_at_the_hard_limit() {
+        let mut input = std::io::Cursor::new(vec![0u8; 1_024]);
+        let result = read_limited(&mut input, 64);
+        assert!(matches!(result, Err(UpdateError::DownloadTooLarge(64))));
+        assert!(input.position() <= 65);
     }
 }

@@ -89,12 +89,13 @@ pub async fn handle(
         .await;
     };
     let policy = Arc::new(policy);
-    let Some(mut session) = ip::IpSession::start(
+    let Some(mut session) = ip::IpSession::start_with_stats(
         scope,
         &context.address_pools,
         policy,
         context.config.ip.mtu as usize,
         context.tun_sender.clone(),
+        Some(context.stats.clone()),
     ) else {
         drop(quota);
         return request::reject(
@@ -114,6 +115,7 @@ pub async fn handle(
         )
         .await;
     }
+    let _activity = context.stats.begin(crate::stats::ActivityKind::IpSession);
     let result = async {
         ensure_ipv6_capacity(&context.connection, stream_id, &session.handle)?;
         let assigned = session.handle.initial_assignment_capsule()?;

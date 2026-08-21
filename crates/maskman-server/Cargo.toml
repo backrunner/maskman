@@ -17,11 +17,13 @@ maskman-platform = { path = "../maskman-platform", version = "0.1.0" }
 maskman-protocol = { path = "../maskman-protocol", version = "0.1.0" }
 quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sha2 = "0.10"
 subtle = "2.6"
 time = { version = "0.3", features = ["formatting", "macros", "parsing", "serde"] }
 thiserror = "2.0"
-tokio = { version = "1.47", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.47", features = ["fs", "io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
 rcgen = "0.13"

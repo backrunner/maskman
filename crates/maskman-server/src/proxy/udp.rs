@@ -7,7 +7,7 @@ use bytes::Bytes;
 use maskman_config::CompiledLimits;
 use tokio::{net::UdpSocket, sync::mpsc, task::JoinHandle};
 
-use crate::datagram;
+use crate::{datagram, stats::RuntimeStats};
 
 const INGRESS_QUEUE: usize = 64;
 const EGRESS_QUEUE: usize = 64;
@@ -50,13 +50,14 @@ pub struct UdpSession {
     pub task: JoinHandle<()>,
 }
 
-pub async fn start(
+pub async fn start_with_stats(
     target: std::net::SocketAddr,
     stream_id: u64,
     connection: quinn::Connection,
     max_payload: usize,
     idle_timeout: Duration,
     limits: CompiledLimits,
+    stats: Option<Arc<RuntimeStats>>,
 ) -> Result<UdpSession, std::io::Error> {
     let socket = UdpSocket::bind(if target.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" }).await?;
     socket.connect(target).await?;
@@ -91,6 +92,7 @@ pub async fn start(
                             &buffer[..length],
                             &egress_tx,
                             &mut egress_limiter,
+                            stats.as_deref(),
                         );
                         idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
                     }
@@ -119,24 +121,36 @@ fn send_to_client(
     payload: &[u8],
     fallback: &mpsc::Sender<Bytes>,
     limiter: &mut TokenBucket,
+    stats: Option<&RuntimeStats>,
 ) {
     if !limiter.allow(payload.len()) {
+        record_result(stats, false);
         return;
     }
     let mut http_payload = Vec::with_capacity(payload.len() + 1);
     if maskman_protocol::capsule::encode_datagram(0, payload, &mut http_payload).is_err() {
+        record_result(stats, false);
         return;
     }
     let http_payload = Bytes::from(http_payload);
     let Ok(encoded) = datagram::encode(stream_id, http_payload.clone()) else {
+        record_result(stats, false);
         return;
     };
-    match connection.send_datagram(encoded) {
-        Ok(()) | Err(quinn::SendDatagramError::TooLarge) => {}
+    let forwarded = match connection.send_datagram(encoded) {
+        Ok(()) => true,
+        Err(quinn::SendDatagramError::TooLarge) => false,
         Err(quinn::SendDatagramError::UnsupportedByPeer | quinn::SendDatagramError::Disabled) => {
-            let _ = fallback.try_send(http_payload);
+            fallback.try_send(http_payload).is_ok()
         }
-        Err(quinn::SendDatagramError::ConnectionLost(_)) => {}
+        Err(quinn::SendDatagramError::ConnectionLost(_)) => false,
+    };
+    record_result(stats, forwarded);
+}
+
+fn record_result(stats: Option<&RuntimeStats>, forwarded: bool) {
+    if let Some(stats) = stats {
+        stats.packet_result(forwarded);
     }
 }
 

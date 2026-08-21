@@ -1,14 +1,17 @@
 use std::{
     fs, io,
     path::{Component, Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use flate2::read::GzDecoder;
 
-use crate::{InstallOutcome, ServiceController, UpdateError, VerifiedArtifact};
+use crate::{
+    install_paths::{current_binary_state, inspect_path, validate_backup_path, ExistingPath},
+    InstallOutcome, ServiceController, UpdateError, VerifiedArtifact,
+};
 
 pub fn install_verified(
     artifact: &VerifiedArtifact,
@@ -16,10 +19,41 @@ pub fn install_verified(
     config_path: Option<&Path>,
     service: Option<&dyn ServiceController>,
 ) -> Result<InstallOutcome, UpdateError> {
+    match inspect_path(binary_path)? {
+        ExistingPath::Missing | ExistingPath::File => {}
+        ExistingPath::Symlink => {
+            return Err(UpdateError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refusing to replace a symbolic-link binary path",
+            )))
+        }
+        ExistingPath::Directory | ExistingPath::Other => {
+            return Err(UpdateError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "update binary path is not a regular file",
+            )))
+        }
+    }
     let parent = binary_path.parent().ok_or_else(|| {
         UpdateError::Io(io::Error::new(io::ErrorKind::InvalidInput, "binary path has no parent"))
     })?;
+    match inspect_path(parent)? {
+        ExistingPath::Missing | ExistingPath::Directory => {}
+        ExistingPath::Symlink => {
+            return Err(UpdateError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "update binary parent must not be a symbolic link",
+            )))
+        }
+        ExistingPath::File | ExistingPath::Other => {
+            return Err(UpdateError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "update binary parent is not a directory",
+            )))
+        }
+    }
     fs::create_dir_all(parent).map_err(UpdateError::Io)?;
+    let _lock = UpdateLock::acquire(parent)?;
     let stage = unique_stage(parent)?;
     let result = install_staged(artifact, binary_path, config_path, service, &stage);
     let cleanup = fs::remove_dir_all(&stage);
@@ -33,6 +67,32 @@ pub fn install_verified(
     }
 }
 
+struct UpdateLock {
+    path: PathBuf,
+}
+
+impl UpdateLock {
+    fn acquire(parent: &Path) -> Result<Self, UpdateError> {
+        let path = parent.join(".maskman-update.lock");
+        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => {
+                drop(file);
+                Ok(Self { path })
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Err(UpdateError::Io(
+                io::Error::new(io::ErrorKind::WouldBlock, "another update is already in progress"),
+            )),
+            Err(error) => Err(UpdateError::Io(error)),
+        }
+    }
+}
+
+impl Drop for UpdateLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 fn install_staged(
     artifact: &VerifiedArtifact,
     binary_path: &Path,
@@ -43,15 +103,39 @@ fn install_staged(
     let staged_binary = unpack_archive(&artifact.archive, stage)?;
     staged_checks(&staged_binary, config_path, &artifact.version)?;
     let backup = backup_path(binary_path);
+    current_binary_state(binary_path)?;
+    validate_backup_path(&backup)?;
     if let Some(service) = service {
         service.stop()?;
     }
-    let had_binary = binary_path.exists();
+    let had_binary = match current_binary_state(binary_path) {
+        Ok(value) => value,
+        Err(error) => {
+            restart_after_failure(service);
+            return Err(error);
+        }
+    };
+    if let Err(error) = validate_backup_path(&backup) {
+        restart_after_failure(service);
+        return Err(error);
+    }
     if had_binary {
-        if backup.exists() {
-            if let Err(error) = fs::remove_file(&backup) {
+        match inspect_path(&backup).inspect_err(|_| {
+            restart_after_failure(service);
+        })? {
+            ExistingPath::Missing => {}
+            ExistingPath::File => {
+                if let Err(error) = fs::remove_file(&backup) {
+                    restart_after_failure(service);
+                    return Err(UpdateError::Io(error));
+                }
+            }
+            ExistingPath::Symlink | ExistingPath::Directory | ExistingPath::Other => {
                 restart_after_failure(service);
-                return Err(UpdateError::Io(error));
+                return Err(UpdateError::Io(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "update backup path is not a regular file",
+                )));
             }
         }
         if let Err(error) = fs::rename(binary_path, &backup) {
@@ -126,10 +210,29 @@ fn rollback(
 }
 
 fn restore_binary(binary_path: &Path, backup: &Path, had_binary: bool) -> Result<(), UpdateError> {
-    if binary_path.exists() {
-        fs::remove_file(binary_path).map_err(UpdateError::Io)?;
+    match inspect_path(binary_path)? {
+        ExistingPath::Missing => {}
+        ExistingPath::File => fs::remove_file(binary_path).map_err(UpdateError::Io)?,
+        ExistingPath::Symlink => {
+            return Err(UpdateError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "refusing to restore over a symbolic-link binary path",
+            )))
+        }
+        ExistingPath::Directory | ExistingPath::Other => {
+            return Err(UpdateError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "cannot restore over a non-file binary path",
+            )))
+        }
     }
     if had_binary {
+        if !matches!(inspect_path(backup)?, ExistingPath::File) {
+            return Err(UpdateError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "update backup is not a regular file",
+            )));
+        }
         fs::rename(backup, binary_path).map_err(UpdateError::Io)?;
     }
     sync_parent(binary_path)
@@ -146,10 +249,7 @@ fn staged_checks(
     config: Option<&Path>,
     version: &semver::Version,
 ) -> Result<(), UpdateError> {
-    let output = Command::new(staged)
-        .arg("--version")
-        .output()
-        .map_err(|error| UpdateError::StagedCheck(error.to_string()))?;
+    let output = run_staged(staged, &["--version"])?;
     if !output.status.success()
         || !String::from_utf8_lossy(&output.stdout).contains(&version.to_string())
     {
@@ -158,15 +258,40 @@ fn staged_checks(
         ));
     }
     if let Some(config) = config {
-        let output = Command::new(staged)
-            .args(["--config", config.to_string_lossy().as_ref(), "config", "validate"])
-            .output()
-            .map_err(|error| UpdateError::StagedCheck(error.to_string()))?;
+        let config_value = config.to_string_lossy().into_owned();
+        let output = run_staged(staged, &["--config", &config_value, "config", "validate"])?;
         if !output.status.success() {
             return Err(UpdateError::StagedCheck("staged config validation failed".into()));
         }
     }
     Ok(())
+}
+
+fn run_staged(binary: &Path, args: &[&str]) -> Result<std::process::Output, UpdateError> {
+    let mut child = Command::new(binary)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| UpdateError::StagedCheck(error.to_string()))?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if child.try_wait().map_err(|error| UpdateError::StagedCheck(error.to_string()))?.is_some()
+        {
+            return child
+                .wait_with_output()
+                .map_err(|error| UpdateError::StagedCheck(error.to_string()));
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(UpdateError::StagedCheck(
+                "staged binary did not finish validation within 5 seconds".into(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn unpack_archive(archive: &[u8], stage: &Path) -> Result<PathBuf, UpdateError> {
@@ -274,6 +399,29 @@ mod tests {
         assert!(validate_archive_path(Path::new("../maskman")).is_err());
         assert!(validate_archive_path(Path::new("/tmp/maskman")).is_err());
         assert!(validate_archive_path(Path::new("bin/maskman")).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_rejects_a_broken_symlink_binary_path() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "maskman-update-symlink-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap_or_else(|error| panic!("create test root: {error}"));
+        let binary = root.join("maskman");
+        symlink(root.join("missing-maskman"), &binary)
+            .unwrap_or_else(|error| panic!("create broken binary symlink: {error}"));
+        let artifact = VerifiedArtifact {
+            version: Version::parse("9.9.9").unwrap_or_else(|error| panic!("version: {error}")),
+            archive: Vec::new(),
+        };
+        assert!(install_verified(&artifact, &binary, None, None).is_err());
+        fs::remove_dir_all(root).unwrap_or_else(|error| panic!("remove test root: {error}"));
     }
 
     #[cfg(unix)]

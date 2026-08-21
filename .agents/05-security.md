@@ -38,7 +38,9 @@
 - QUIC TLS client certificate 在 transport handshake 期间验证。
 - application auth 只从受信任证书链和 SAN/fingerprint 映射 principal。
 - trust store 按 config generation 原子替换；旧连接可按策略继续直到 drain。
-- 私有 CA 文件 mode 0640、owner root:maskman；private key mode 0600。
+- setup 生成的 private key 初始为 mode 0600；安装 service 后由 root:maskman
+  以 mode 0640 共享给已降权 worker，root 仍保留 owner，worker 仅有读取权限。
+  私有 CA 文件同样为 mode 0640、owner root:maskman。
 - mTLS 与 bearer 同时启用时按配置要求 all-of 或 any-of；默认 bearer-or-mtls。
 
 不要自己解析 TLS record 或实现密码学。只用受支持的 rustls API，并在 release 前锁定 crypto provider 与审计版本。
@@ -136,9 +138,9 @@ IP proxy 不是“验一次 request 就全放行”：
 
 ### 本地 control socket
 
-- root:maskman-admin 0660。
+- daemon owner 0600（可由未来 supervisor 转交给 maskman-admin group）。
 - 每条 command 带 protocol version、request id 和 max body。
-- status 可读；reload/stop/update-required operations 做 UID/GID 检查。
+- status 可读；reload/stop/update-required operations 做 peer UID/GID 检查。
 - 不把它绑定到 TCP 或 MASQUE authority。
 
 ## 8. DNS 安全

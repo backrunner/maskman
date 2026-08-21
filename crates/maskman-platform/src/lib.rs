@@ -1,11 +1,20 @@
-#![forbid(unsafe_code)]
+// Platform is the only crate allowed to contain narrowly-scoped fd ownership
+// shims. Every unsafe block below documents the descriptor invariant it relies
+// on; protocol and CLI crates remain `forbid(unsafe_code)`.
+#![allow(unsafe_code)]
 
+mod forwarding;
+mod identity;
 mod journal;
+mod nat;
+mod privilege;
 mod service;
 mod tun;
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 
 use thiserror::Error;
 
@@ -33,7 +42,18 @@ pub enum PlatformError {
     UnsupportedCleanup(String),
 }
 
+pub use forwarding::{enable_forwarding, enable_forwarding_persisted, restore_forwarding};
+pub use identity::{ensure_worker_identity, WorkerIdentityProvision};
 pub use journal::{cleanup as cleanup_journal, CleanupReport, JournalEntry, NetworkJournal};
+pub use nat::{
+    apply_managed_nat, apply_managed_nat_persisted, cleanup_managed_nat, managed_nat_available,
+    managed_nat_resource_id, ManagedNatConfig,
+};
+pub use privilege::{
+    apply_worker_hardening, control_peer_allowed, current_uid, inherited_tun, inherited_udp,
+    make_inheritable, prepare_worker_access, spawn_worker, terminate_worker, worker_identity,
+    worker_identity_available,
+};
 pub use service::{
     control as service_control, default_config_path, default_service_path, default_state_dir,
     install as install_service, status as service_status, uninstall as uninstall_service,
@@ -53,3 +73,5 @@ pub use tun::{TunConfig, TunDevice};
 
 #[cfg(target_os = "linux")]
 pub use linux::LinuxRouteManager;
+#[cfg(target_os = "macos")]
+pub use macos::MacRouteManager;

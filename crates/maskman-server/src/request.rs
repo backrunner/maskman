@@ -21,6 +21,7 @@ use crate::{
         resolver, udp,
     },
     session::{QuotaState, SessionRegistry},
+    stats::{ActivityKind, RuntimeStats},
 };
 
 const MAX_CAPSULE_VALUE_BYTES: usize = 65_535;
@@ -42,6 +43,7 @@ pub struct RequestContext {
     pub connection: quinn::Connection,
     pub connection_id: u64,
     pub peer_certificate_sha256: Option<[u8; 32]>,
+    pub(crate) stats: Arc<RuntimeStats>,
 }
 
 #[derive(Debug, Error)]
@@ -207,13 +209,14 @@ async fn handle_udp(
             .await;
     };
     let stream_id = stream.id().into_inner();
-    let session = match udp::start(
+    let session = match udp::start_with_stats(
         target,
         stream_id,
         context.connection.clone(),
         context.config.udp.max_payload_bytes as usize,
         context.config.udp.idle_timeout,
         policy.limits.clone(),
+        Some(context.stats.clone()),
     )
     .await
     {
@@ -225,6 +228,7 @@ async fn handle_udp(
         }
     };
     let udp::UdpSession { handle, mut egress, mut violations, task } = session;
+    let _activity = context.stats.begin(ActivityKind::UdpSession);
     context.registry.insert(stream_id, handle.clone());
     stream.send_response(response(StatusCode::OK, true)).await.map_err(RequestError::Response)?;
     let result = drive_proxy_stream(
@@ -233,6 +237,7 @@ async fn handle_udp(
         &mut egress,
         &mut violations,
         context.config.udp.max_payload_bytes as usize,
+        &context.stats,
     )
     .await;
     if result.is_err() {
@@ -250,6 +255,7 @@ async fn drive_proxy_stream(
     egress: &mut mpsc::Receiver<Bytes>,
     violations: &mut mpsc::Receiver<usize>,
     max_payload: usize,
+    stats: &RuntimeStats,
 ) -> Result<(), RequestError> {
     let mut decoder = Decoder::new(CapsuleLimits::uniform(MAX_CAPSULE_VALUE_BYTES));
     loop {
@@ -260,7 +266,10 @@ async fn drive_proxy_stream(
                     let length = chunk.len();
                     for event in decoder.push(chunk)? {
                         if let DecodeEvent::Capsule(value) = event {
-                            forward_capsule(&value, session, max_payload)?;
+                            let forwarded = forward_capsule(&value, session, max_payload)?;
+                            if value.capsule_type == capsule::DATAGRAM_CAPSULE {
+                                stats.packet_result(forwarded);
+                            }
                         }
                     }
                     data.advance(length);
@@ -296,18 +305,17 @@ fn forward_capsule(
     capsule: &capsule::Capsule,
     session: &udp::UdpSessionHandle,
     max_payload: usize,
-) -> Result<(), RequestError> {
+) -> Result<bool, RequestError> {
     if capsule.capsule_type != capsule::DATAGRAM_CAPSULE {
-        return Ok(());
+        return Ok(false);
     }
     let datagram =
         capsule::decode_datagram(&capsule.value).map_err(|_| capsule::DecoderError::Truncated)?;
     capsule::validate_udp_payload(&datagram)?;
     if datagram.context_id != 0 || datagram.payload.len() > max_payload {
-        return Ok(());
+        return Ok(false);
     }
-    let _ = session.try_send(Bytes::copy_from_slice(datagram.payload));
-    Ok(())
+    Ok(session.try_send(Bytes::copy_from_slice(datagram.payload)))
 }
 
 fn is_connect_udp(request: &Request<()>) -> bool {

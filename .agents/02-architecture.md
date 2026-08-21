@@ -39,7 +39,8 @@ service manager 负责守护进程生命周期，Maskman 自身不 double-fork�
 
 - Linux：systemd system service。
 - macOS：launchd system daemon。
-- 开发模式：maskman serve --foreground，不安装 service。
+- 开发模式：maskman serve，不安装 service；仅安装后的 service 环境设置
+  `MASKMAN_ROLE=supervisor`。
 
 supervisor 必须在 Tokio 多线程 runtime 创建前完成特权初始化和 worker spawn，避免多线程进程 fork 的未定义状态。worker 使用专用 maskman 系统用户；supervisor 只保留网络资源管理、worker 监控和清理职责，不解析远端 HTTP 或 packet payload。
 
@@ -152,7 +153,7 @@ Accepted
 - supervisor 创建 utun，platform adapter 去除或添加 utun 的 address-family 前缀。
 - route 使用系统 route 接口或受控命令。
 - NAT 只修改专用 pf anchor，不覆盖用户 pf.conf。
-- launchd 以前台进程方式管理 root supervisor，worker 降为 _maskman。
+- launchd 以前台进程方式管理 root supervisor，worker 降为专用 `maskman` 系统用户。
 
 所有平台操作都要有幂等 apply、inspect 和 cleanup。启动时只回收带 Maskman 标识且能由 state file 证明归属的残留资源，不能模糊匹配或删除用户规则。
 
@@ -261,8 +262,12 @@ status 和 reload 通过本地 Unix domain socket，不开放远程管理 HTTP�
 
 - Linux：/run/maskman/control.sock。
 - macOS：/var/run/maskman/control.sock。
-- socket 由 root 创建，group 为 maskman-admin，权限 0660。
+- socket 当前默认以 daemon owner 创建，权限 0600；reload 还会检查 peer UID。后续 supervisor 可将它交给 `maskman-admin` group 扩展只读运维访问。
 - 协议为带 version 的长度前缀 JSON；所有字段有大小上限。
 - status --json 输出稳定 schema，普通 status 输出彩色摘要。
 
 stop 仍优先通过 systemd/launchd，使 service manager 保持真实状态。control socket 不接受远端 token，也不复用 MASQUE 监听端口。
+
+metrics 仅绑定 `observability.metrics_listen` 的本机聚合端点，使用固定的
+Prometheus 文本字段和有界 HTTP/1.1 适配；它不属于远程代理 profile，也不
+接受配置或控制命令。

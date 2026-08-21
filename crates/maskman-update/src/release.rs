@@ -1,3 +1,5 @@
+use std::io::Read;
+
 use semver::Version;
 use serde::Deserialize;
 
@@ -6,6 +8,8 @@ use crate::{
     verify::{decode_public_key, download_limited, verify_checksum, verify_signature},
     UpdateClientState, UpdateError, VerifiedArtifact, API_BASE,
 };
+
+const MAX_RELEASE_METADATA_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReleaseInfo {
@@ -73,26 +77,47 @@ impl UpdateClient {
             self.state.api_base.trim_end_matches('/'),
             self.state.repository
         );
-        let releases = self
+        let response = self
             .state
             .http
             .get(url)
             .send()
             .map_err(|error| UpdateError::Http(error.to_string()))?
             .error_for_status()
-            .map_err(|error| UpdateError::Http(error.to_string()))?
-            .json::<Vec<GithubRelease>>()
+            .map_err(|error| UpdateError::Http(error.to_string()))?;
+        if response.url().scheme() != "https" {
+            return Err(UpdateError::Http("release metadata redirect must remain on HTTPS".into()));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_RELEASE_METADATA_BYTES as u64)
+        {
+            return Err(UpdateError::DownloadTooLarge(MAX_RELEASE_METADATA_BYTES));
+        }
+        let mut bytes = Vec::new();
+        response
+            .take((MAX_RELEASE_METADATA_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(UpdateError::Io)?;
+        if bytes.len() > MAX_RELEASE_METADATA_BYTES {
+            return Err(UpdateError::DownloadTooLarge(MAX_RELEASE_METADATA_BYTES));
+        }
+        let releases = serde_json::from_slice::<Vec<GithubRelease>>(&bytes)
             .map_err(|error| UpdateError::Http(error.to_string()))?;
         let mut candidates = releases
             .iter()
             .filter_map(|release| release_info(release, &self.state.target, requested.as_ref()))
+            .filter(|release| requested.is_some() || release.version > self.state.current_version)
             .collect::<Vec<_>>();
         candidates.sort_by(|left, right| left.version.cmp(&right.version));
-        candidates.pop().ok_or_else(|| {
-            UpdateError::ReleaseNotFound(
-                requested.map_or_else(|| "latest".into(), |value| value.to_string()),
+        candidates.pop().ok_or_else(|| match requested {
+            Some(version) => {
+                UpdateError::ReleaseNotFound(version.to_string(), self.state.target.clone())
+            }
+            None => UpdateError::NoUpdateAvailable(
+                self.state.current_version.to_string(),
                 self.state.target.clone(),
-            )
+            ),
         })
     }
 
@@ -139,6 +164,7 @@ fn release_info(
             .iter()
             .find(|asset| asset.name == name)
             .map(|asset| asset.browser_download_url.clone())
+            .filter(|url| url.starts_with("https://"))
     };
     Some(ReleaseInfo {
         version,

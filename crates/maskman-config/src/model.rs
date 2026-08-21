@@ -399,6 +399,13 @@ fn default_max_udp_payload() -> u32 {
     65_527
 }
 fn default_interface_name() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        // Let utun allocate the next free unit instead of colliding on a fixed
+        // index when a second daemon is started.
+        String::new()
+    }
+    #[cfg(not(target_os = "macos"))]
     "maskman0".into()
 }
 fn default_mtu() -> u32 {

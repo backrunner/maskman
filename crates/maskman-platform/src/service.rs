@@ -92,9 +92,24 @@ pub fn default_service_path() -> PathBuf {
 
 pub fn install(spec: &ServiceSpec, dry_run: bool) -> Result<bool, PlatformError> {
     let rendered = spec.render()?;
-    if dry_run {
-        return Ok(spec.service_path.exists());
+    let path_state = inspect_service_path(&spec.service_path)?;
+    match path_state {
+        ServicePathState::Missing | ServicePathState::Regular => {}
+        ServicePathState::Symlink => {
+            return Err(PlatformError::InvalidService(
+                "refusing to replace a symbolic-link service definition".into(),
+            ))
+        }
+        ServicePathState::Other => {
+            return Err(PlatformError::InvalidService(
+                "service definition path is not a regular file".into(),
+            ))
+        }
     }
+    if dry_run {
+        return Ok(!matches!(path_state, ServicePathState::Missing));
+    }
+    let _identity = crate::ensure_worker_identity(false)?;
     write_atomic(&spec.service_path, rendered.as_bytes())?;
     manager_command("install", spec)?;
     if cfg!(target_os = "linux") {
@@ -104,13 +119,24 @@ pub fn install(spec: &ServiceSpec, dry_run: bool) -> Result<bool, PlatformError>
 }
 
 pub fn uninstall(spec: &ServiceSpec, dry_run: bool) -> Result<(), PlatformError> {
-    if !spec.service_path.exists() {
-        return Ok(());
+    match inspect_service_path(&spec.service_path)? {
+        ServicePathState::Missing => return Ok(()),
+        ServicePathState::Symlink => {
+            return Err(PlatformError::InvalidService(
+                "refusing to operate on a symbolic-link service definition".into(),
+            ))
+        }
+        ServicePathState::Regular => {}
+        ServicePathState::Other => {
+            return Err(PlatformError::InvalidService(
+                "service definition path is not a regular file".into(),
+            ))
+        }
     }
     if !dry_run {
         let _ = manager_command("stop", spec);
         manager_command("uninstall", spec)?;
-        if spec.service_path.exists() {
+        if matches!(inspect_service_path(&spec.service_path)?, ServicePathState::Regular) {
             fs::remove_file(&spec.service_path).map_err(PlatformError::ServiceIo)?;
         }
         if cfg!(target_os = "linux") {
@@ -121,8 +147,14 @@ pub fn uninstall(spec: &ServiceSpec, dry_run: bool) -> Result<(), PlatformError>
 }
 
 pub fn control(spec: &ServiceSpec, action: ServiceAction) -> Result<(), PlatformError> {
-    if !spec.service_path.exists() {
-        return Err(PlatformError::ServiceNotInstalled);
+    match inspect_service_path(&spec.service_path)? {
+        ServicePathState::Regular => {}
+        ServicePathState::Missing => return Err(PlatformError::ServiceNotInstalled),
+        ServicePathState::Symlink | ServicePathState::Other => {
+            return Err(PlatformError::InvalidService(
+                "service definition path is not a regular file".into(),
+            ))
+        }
     }
     let action = match action {
         ServiceAction::Start => "start",
@@ -133,13 +165,21 @@ pub fn control(spec: &ServiceSpec, action: ServiceAction) -> Result<(), Platform
 }
 
 pub fn status(spec: &ServiceSpec) -> Result<ServiceStatus, PlatformError> {
-    if !spec.service_path.exists() {
-        return Ok(ServiceStatus {
-            installed: false,
-            running: false,
-            pid: None,
-            detail: "service definition is not installed".into(),
-        });
+    match inspect_service_path(&spec.service_path)? {
+        ServicePathState::Missing => {
+            return Ok(ServiceStatus {
+                installed: false,
+                running: false,
+                pid: None,
+                detail: "service definition is not installed".into(),
+            })
+        }
+        ServicePathState::Regular => {}
+        ServicePathState::Symlink | ServicePathState::Other => {
+            return Err(PlatformError::InvalidService(
+                "service definition path is not a regular file".into(),
+            ))
+        }
     }
     if cfg!(target_os = "linux") {
         status_systemd(&spec.service_path)
@@ -151,6 +191,7 @@ pub fn status(spec: &ServiceSpec) -> Result<ServiceStatus, PlatformError> {
 }
 
 fn write_atomic(path: &Path, content: &[u8]) -> Result<(), PlatformError> {
+    reject_existing_symlink(path)?;
     let parent = path.parent().ok_or_else(|| {
         PlatformError::ServiceIo(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -170,6 +211,7 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), PlatformError> {
         file.write_all(content).map_err(PlatformError::ServiceIo)?;
         file.sync_all().map_err(PlatformError::ServiceIo)?;
         drop(file);
+        reject_existing_symlink(path)?;
         fs::rename(&temporary, path).map_err(PlatformError::ServiceIo)?;
         set_service_permissions(path)?;
         fs::File::open(parent)
@@ -180,6 +222,33 @@ fn write_atomic(path: &Path, content: &[u8]) -> Result<(), PlatformError> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServicePathState {
+    Missing,
+    Regular,
+    Symlink,
+    Other,
+}
+
+fn inspect_service_path(path: &Path) -> Result<ServicePathState, PlatformError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Ok(ServicePathState::Symlink),
+        Ok(metadata) if metadata.is_file() => Ok(ServicePathState::Regular),
+        Ok(_) => Ok(ServicePathState::Other),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ServicePathState::Missing),
+        Err(error) => Err(PlatformError::ServiceIo(error)),
+    }
+}
+
+fn reject_existing_symlink(path: &Path) -> Result<(), PlatformError> {
+    if matches!(inspect_service_path(path)?, ServicePathState::Symlink) {
+        return Err(PlatformError::InvalidService(
+            "refusing to replace a symbolic-link service definition".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn create_temporary(parent: &Path, file_name: &str) -> Result<(PathBuf, fs::File), PlatformError> {
@@ -220,7 +289,7 @@ fn validate_path_text(path: &Path, field: &str) -> Result<(), PlatformError> {
 
 fn render_systemd(spec: &ServiceSpec) -> String {
     format!(
-        "[Unit]\nDescription=Maskman MASQUE proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={} --config {} serve\nExecReload=/bin/kill -HUP $MAINPID\nRestart=on-failure\nRestartSec=2s\nStartLimitIntervalSec=60s\nStartLimitBurst=5\nUser=root\nRuntimeDirectory=maskman\nStateDirectory=maskman\nConfigurationDirectory=maskman\nWorkingDirectory={}\nLimitNOFILE=65536\nCapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID\nAmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=true\nReadWritePaths={} {}\n\n[Install]\nWantedBy=multi-user.target\n",
+        "[Unit]\nDescription=Maskman MASQUE proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart={} --config {} serve\nExecReload=/bin/kill -HUP $MAINPID\nEnvironment=MASKMAN_ROLE=supervisor\nKillMode=control-group\nRestart=on-failure\nRestartSec=2s\nStartLimitIntervalSec=60s\nStartLimitBurst=5\nRuntimeDirectory=maskman\nStateDirectory=maskman\nConfigurationDirectory=maskman\nWorkingDirectory={}\nLimitNOFILE=65536\nCapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID\nAmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=true\nDeviceAllow=/dev/net/tun rw\nRestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\nRestrictSUIDSGID=true\nLockPersonality=true\nReadWritePaths={}\nReadOnlyPaths={}\n\n[Install]\nWantedBy=multi-user.target\n",
         systemd_quote(&spec.binary),
         systemd_quote(&spec.config),
         systemd_quote(&spec.state_dir),
@@ -232,7 +301,7 @@ fn render_systemd(spec: &ServiceSpec) -> String {
 fn render_launchd(spec: &ServiceSpec) -> String {
     let log_dir = spec.state_dir.join("logs");
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>top.backrunner.maskman</string>\n  <key>ProgramArguments</key><array><string>{}</string><string>--config</string><string>{}</string><string>serve</string></array>\n  <key>RunAtLoad</key><false/>\n  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n  <key>ThrottleInterval</key><integer>2</integer>\n  <key>SoftResourceLimits</key><dict><key>NumberOfFiles</key><integer>65536</integer></dict>\n  <key>HardResourceLimits</key><dict><key>NumberOfFiles</key><integer>65536</integer></dict>\n  <key>StandardOutPath</key><string>{}/stdout.log</string>\n  <key>StandardErrorPath</key><string>{}/stderr.log</string>\n</dict>\n</plist>\n",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key><string>top.backrunner.maskman</string>\n  <key>ProgramArguments</key><array><string>{}</string><string>--config</string><string>{}</string><string>serve</string></array>\n  <key>EnvironmentVariables</key><dict><key>MASKMAN_ROLE</key><string>supervisor</string></dict>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>\n  <key>ThrottleInterval</key><integer>2</integer>\n  <key>SoftResourceLimits</key><dict><key>NumberOfFiles</key><integer>65536</integer></dict>\n  <key>HardResourceLimits</key><dict><key>NumberOfFiles</key><integer>65536</integer></dict>\n  <key>StandardOutPath</key><string>{}/stdout.log</string>\n  <key>StandardErrorPath</key><string>{}/stderr.log</string>\n</dict>\n</plist>\n",
         xml_escape(&spec.binary),
         xml_escape(&spec.config),
         xml_escape(&log_dir),
@@ -263,7 +332,11 @@ fn manager_command(action: &str, spec: &ServiceSpec) -> Result<(), PlatformError
         return Err(PlatformError::ServiceManagementUnavailable);
     };
     let output = command.stdin(Stdio::null()).output().map_err(PlatformError::ServiceCommand)?;
-    if output.status.success() {
+    let expected_idempotent_error = matches!(action, "install" | "uninstall")
+        && String::from_utf8_lossy(&output.stderr)
+            .to_ascii_lowercase()
+            .contains(if action == "install" { "already" } else { "not found" });
+    if output.status.success() || expected_idempotent_error {
         Ok(())
     } else {
         Err(PlatformError::ServiceCommand(std::io::Error::other(
@@ -396,35 +469,5 @@ fn set_service_permissions(_path: &Path) -> Result<(), PlatformError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{render_launchd, render_systemd, ServiceSpec};
-    use std::path::PathBuf;
-
-    fn spec() -> ServiceSpec {
-        ServiceSpec {
-            binary: PathBuf::from("/usr/local/bin/maskman"),
-            config: PathBuf::from("/etc/maskman/config.toml"),
-            state_dir: PathBuf::from("/var/lib/maskman"),
-            service_path: PathBuf::from("/tmp/maskman.service"),
-        }
-    }
-
-    #[test]
-    fn systemd_template_has_hardening_and_absolute_exec() {
-        let output = render_systemd(&spec());
-        assert!(output.contains("NoNewPrivileges=true"));
-        assert!(output.contains("ExecStart=\"/usr/local/bin/maskman\""));
-        assert!(!output.contains("sh -c"));
-    }
-
-    #[test]
-    fn launchd_template_keeps_arguments_separate_and_escapes_xml() {
-        let mut spec = spec();
-        spec.config = PathBuf::from("/etc/maskman/a&b.toml");
-        let output = render_launchd(&spec);
-        assert!(output
-            .contains("<array><string>/usr/local/bin/maskman</string><string>--config</string>"));
-        assert!(output.contains("a&amp;b.toml"));
-        assert!(output.contains("<key>RunAtLoad</key><false/>"));
-    }
-}
+#[path = "service_tests.rs"]
+mod tests;

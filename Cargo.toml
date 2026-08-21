@@ -19,7 +19,7 @@ authors = ["BackRunner <dev@backrunner.top>"]
 rust-version = "1.88"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "warn"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

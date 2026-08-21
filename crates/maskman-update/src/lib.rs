@@ -8,6 +8,7 @@ use semver::Version;
 use thiserror::Error;
 
 mod install;
+mod install_paths;
 mod release;
 mod target;
 mod verify;
@@ -46,6 +47,8 @@ pub enum UpdateError {
     Http(String),
     #[error("no signed release was found for version {0} and target {1}")]
     ReleaseNotFound(String, String),
+    #[error("maskman {0} is already the newest signed release for {1}")]
+    NoUpdateAvailable(String, String),
     #[error("release asset `{0}` is missing")]
     MissingAsset(String),
     #[error("release asset exceeds the {0} byte limit")]

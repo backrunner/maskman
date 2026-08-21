@@ -29,15 +29,18 @@ that moves packets between this queue and the platform TUN handle; it has a
 fixed pair of long-lived tasks and never spawns work per packet.
 
 maskman-platform now owns TUN creation through tun-rs, a resource journal,
-and a Linux-only rtnetlink route manager. Route operations record their
-destination and interface index before cleanup. No service, firewall, NAT, or
+and a Linux-only rtnetlink route manager. Route operations persist their
+destination and interface index before mutation, and TUN/NAT/sysctl operations
+use the same prepare-before-apply journal contract. The installed service uses
+a root supervisor to open listeners and network resources, then passes only
+the prepared descriptors to a dedicated worker. No service, firewall, NAT, or
 privilege mutation is performed by protocol or request code.
 
 ## Verification
 
 ~~~
-cargo test -p maskman-server --all-targets             17 passed
-cargo test -p maskman-platform --all-targets            2 passed
+cargo test -p maskman-server --all-targets             local suite passed
+cargo test -p maskman-platform --all-targets            local suite passed
 cargo check --workspace --all-targets                  passed
 ~~~
 
@@ -51,7 +54,15 @@ The protocol layer also bounds ADDRESS_REQUEST IDs and route tables, rejects
 literal prefixes that have no policy intersection before leasing resources,
 and emits bounded IPv4/IPv6 ICMP errors for policy and routing failures.
 
-Privileged Linux namespace, nftables/NAT, ICMP Packet Too Big generation, and
-macOS utun route smoke tests remain M4/M5 release gates. The current platform
-implementation deliberately keeps those operations behind explicit adapters
-and does not silently mutate host networking during ordinary unit tests.
+The runtime control plane now provides a versioned local `status`/`reload`
+protocol, generation-aware atomic config swaps, bounded Prometheus text
+metrics, and live connection/session/packet counters. Linux managed NAT is
+implemented behind an ownership-marked nftables table; macOS has dedicated
+route and pf-anchor adapters. Journal loading rejects symlinks, broad file
+permissions, foreign interface names, and foreign NAT identifiers before any
+cleanup mutation.
+
+Privileged Linux namespace forwarding, production supervisor/worker fd
+passing, ICMP Packet Too Big delivery under a real PMTU, and macOS utun/pf
+route smoke tests remain M4/M5 release gates. Platform mutation remains behind
+explicit adapters and is never exercised by ordinary unit tests.

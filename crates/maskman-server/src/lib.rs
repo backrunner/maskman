@@ -1,26 +1,53 @@
 #![forbid(unsafe_code)]
 
-use std::{net::SocketAddr, path::Path};
+use std::{
+    net::{SocketAddr, UdpSocket},
+    path::{Path, PathBuf},
+};
 
 use maskman_config::CompiledConfig;
 use thiserror::Error;
 use tokio::task::JoinSet;
 
 mod auth;
+pub mod control;
 mod datagram;
+mod metrics;
 mod policy;
 mod proxy;
 mod request;
 mod request_ip;
+mod resources;
 mod session;
+mod stats;
+mod supervisor;
 mod tls;
 mod transport;
 mod tun_bridge;
 
+pub use stats::RuntimeSnapshot;
 pub use transport::{
     server_config, TransportContext, TransportError, TransportLimits, TransportMode,
     TransportServer, TransportShutdown,
 };
+
+pub use resources::PreparedResources;
+
+/// Resources transferred from the root supervisor to the unprivileged worker.
+pub struct WorkerResources {
+    pub(crate) listeners: Vec<UdpSocket>,
+    pub(crate) tun: Option<maskman_platform::TunDevice>,
+}
+
+pub fn validate_tls(config: &CompiledConfig) -> Result<(), TransportError> {
+    transport::server_config_with_client_ca(
+        &config.certificate_file,
+        &config.private_key_file,
+        config.client_ca_file.as_deref(),
+        matches!(&config.auth_mode, maskman_config::AuthMode::Mtls),
+    )
+    .map(|_| ())
+}
 
 #[derive(Debug, Error)]
 pub enum ServerError {
@@ -47,15 +74,94 @@ pub fn status(config: &CompiledConfig) -> ServerStatus {
 }
 
 pub async fn serve(config: CompiledConfig) -> Result<(), ServerError> {
+    serve_inner(config, None, None).await
+}
+
+pub async fn serve_with_config_path(
+    config: CompiledConfig,
+    config_path: PathBuf,
+) -> Result<(), ServerError> {
+    if std::env::var("MASKMAN_ROLE").as_deref() == Ok("supervisor") {
+        supervisor::run(config, config_path).await
+    } else {
+        serve_inner(config, Some(config_path), None).await
+    }
+}
+
+pub async fn serve_worker_with_resources(
+    config: CompiledConfig,
+    config_path: PathBuf,
+    resources: WorkerResources,
+) -> Result<(), ServerError> {
+    serve_inner(config, Some(config_path), Some(resources)).await
+}
+
+/// Decode the descriptor hand-off prepared by the platform supervisor.
+pub fn worker_resources_from_environment(
+    config: &CompiledConfig,
+) -> Result<WorkerResources, ServerError> {
+    let raw = std::env::var("MASKMAN_LISTENER_FDS")
+        .map_err(|_| ServerError::Transport("worker listener descriptors are missing".into()))?;
+    if raw.len() > 2048 {
+        return Err(ServerError::Transport("worker listener descriptor list is too long".into()));
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut listeners = Vec::new();
+    for value in raw.split(',') {
+        let fd = value
+            .parse::<i32>()
+            .map_err(|_| ServerError::Transport("worker listener descriptor is invalid".into()))?;
+        if fd < 0 || !seen.insert(fd) {
+            return Err(ServerError::Transport("worker listener descriptors are invalid".into()));
+        }
+        listeners.push(
+            maskman_platform::inherited_udp(fd)
+                .map_err(|error| ServerError::Transport(error.to_string()))?,
+        );
+    }
+    if listeners.is_empty() || listeners.len() != config.listen.len() {
+        return Err(ServerError::Transport(
+            "worker listener descriptor count does not match configuration".into(),
+        ));
+    }
+    let tun = if config.ip.enabled {
+        let raw = std::env::var("MASKMAN_TUN_FD")
+            .map_err(|_| ServerError::Transport("worker TUN descriptor is missing".into()))?;
+        let fd = raw
+            .parse::<i32>()
+            .map_err(|_| ServerError::Transport("worker TUN descriptor is invalid".into()))?;
+        if fd < 0 || !seen.insert(fd) {
+            return Err(ServerError::Transport("worker TUN descriptor is invalid".into()));
+        }
+        Some(
+            maskman_platform::inherited_tun(
+                fd,
+                config.ip.interface_name.clone(),
+                config.ip.mtu as u16,
+            )
+            .map_err(|error| ServerError::Transport(error.to_string()))?,
+        )
+    } else {
+        if std::env::var_os("MASKMAN_TUN_FD").is_some() {
+            return Err(ServerError::Transport(
+                "worker received a TUN descriptor while IP proxy is disabled".into(),
+            ));
+        }
+        None
+    };
+    Ok(WorkerResources { listeners, tun })
+}
+
+async fn serve_inner(
+    config: CompiledConfig,
+    config_path: Option<PathBuf>,
+    worker_resources: Option<WorkerResources>,
+) -> Result<(), ServerError> {
     if config.listen.is_empty() {
         return Err(ServerError::MissingListener);
     }
-    if config.ip.nat_managed {
-        return Err(ServerError::Transport(
-            "managed NAT is not available until a platform firewall backend is configured"
-                .to_owned(),
-        ));
-    }
+    maskman_platform::apply_worker_hardening()
+        .map_err(|error| ServerError::Transport(error.to_string()))?;
     let quic_config = transport::server_config_with_client_ca(
         &config.certificate_file,
         &config.private_key_file,
@@ -73,65 +179,54 @@ pub async fn serve(config: CompiledConfig) -> Result<(), ServerError> {
     let mut servers = Vec::with_capacity(config.listen.len());
     let config = std::sync::Arc::new(config);
     let context = std::sync::Arc::new(TransportContext::new(config.clone()));
-    let journal_path = config.state_dir.join("resource-journal.json");
-    let mut journal = if config.ip.enabled {
-        let journal = maskman_platform::NetworkJournal::load(&journal_path)
-            .map_err(|error| ServerError::Transport(error.to_string()))?;
-        if !journal.is_empty() {
-            return Err(ServerError::Transport(format!(
-                "owned platform resources remain in {}; run maskman cleanup before starting",
-                journal_path.display()
-            )));
+    let mut owned_resources =
+        if worker_resources.is_none() { Some(resources::prepare(&config).await?) } else { None };
+    let (mut listeners, tun, journal_path) = match worker_resources {
+        Some(resources) => (resources.listeners, resources.tun, None),
+        None => {
+            let resources = owned_resources
+                .take()
+                .ok_or_else(|| ServerError::Transport("resource preparation was lost".into()))?;
+            let (listeners, tun, journal_path) = resources.into_worker_parts();
+            (listeners, tun, journal_path)
         }
-        Some(journal)
-    } else {
-        None
     };
+    // `pop` below keeps the configured listener order without repeatedly
+    // shifting the vector.
+    listeners.reverse();
     let mut tun_task = if config.ip.enabled {
+        let device = tun.ok_or_else(|| {
+            ServerError::Transport("IP worker started without a prepared TUN device".into())
+        })?;
         let receiver = context
             .take_tun_receiver()
-            .ok_or_else(|| ServerError::Transport("TUN queue was already claimed".to_owned()))?;
-        let device = maskman_platform::TunDevice::create(
-            maskman_platform::TunConfig {
-                name: config.ip.interface_name.clone(),
-                mtu: config.ip.mtu as u16,
-            },
-            journal.as_mut().ok_or_else(|| {
-                ServerError::Transport("TUN journal was not initialized".to_owned())
-            })?,
-        )
-        .map_err(|error| ServerError::Transport(error.to_string()))?;
-        journal
-            .as_ref()
-            .ok_or_else(|| ServerError::Transport("TUN journal was not initialized".to_owned()))?
-            .persist(&journal_path)
-            .map_err(|error| ServerError::Transport(error.to_string()))?;
-        if let Err(error) = provision_routes(
-            &config,
-            &device,
-            journal.as_mut().ok_or_else(|| {
-                ServerError::Transport("TUN journal was not initialized".to_owned())
-            })?,
-            &journal_path,
-        )
-        .await
-        {
-            drop(device);
-            let cleanup = cleanup_owned_resources(&journal_path).await;
-            return match cleanup {
-                Ok(()) => Err(error),
-                Err(cleanup_error) => Err(ServerError::Transport(format!(
-                    "{error}; resource cleanup failed: {cleanup_error}"
-                ))),
-            };
-        }
+            .ok_or_else(|| ServerError::Transport("TUN queue was already claimed".into()))?;
         Some(tokio::spawn(tun_bridge::run(device, context.clone(), receiver)))
     } else {
         None
     };
-    for address in config.listen.iter().copied() {
-        let server = match TransportServer::bind_with_context(
-            address,
+    let metrics = match metrics::start(config.metrics_listen, context.stats_handle()).await {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            if let Some(task) = tun_task.take() {
+                task.abort();
+                let _ = task.await;
+            }
+            if let Some(path) = journal_path.as_deref() {
+                let _ = resources::cleanup(Some(path)).await;
+            }
+            return Err(ServerError::Transport(format!(
+                "failed to bind metrics listener {}: {error}",
+                config.metrics_listen
+            )));
+        }
+    };
+    for _ in 0..config.listen.len() {
+        let socket = listeners.pop().ok_or_else(|| {
+            ServerError::Transport("worker listener descriptor count is too small".into())
+        })?;
+        let server = match TransportServer::bind_with_socket(
+            socket,
             quic_config.clone(),
             limits,
             transport::default_server_mode(),
@@ -143,90 +238,109 @@ pub async fn serve(config: CompiledConfig) -> Result<(), ServerError> {
                     task.abort();
                     let _ = task.await;
                 }
-                if config.ip.enabled {
-                    let _ = cleanup_owned_resources(&journal_path).await;
+                if let Some(path) = journal_path.as_deref() {
+                    let _ = resources::cleanup(Some(path)).await;
                 }
+                metrics.stop().await;
                 return Err(ServerError::Transport(error.to_string()));
             }
         };
         servers.push(server);
     }
-    let result = run_servers(servers).await;
+    let control = if config_path.is_some() {
+        match control::start(control::socket_path(&config), config_path.clone(), context.clone())
+            .await
+        {
+            Ok(control) => Some(control),
+            Err(error) => {
+                metrics.stop().await;
+                if let Some(task) = tun_task.take() {
+                    task.abort();
+                    let _ = task.await;
+                }
+                if let Some(path) = journal_path.as_deref() {
+                    let _ = resources::cleanup(Some(path)).await;
+                }
+                return Err(ServerError::Transport(error.to_string()));
+            }
+        }
+    } else {
+        None
+    };
+    let result = run_servers(servers, config_path.as_deref(), &context).await;
+    let control_result = match control {
+        Some(control) => {
+            control.stop().await.map_err(|error| ServerError::Transport(error.to_string()))
+        }
+        None => Ok(()),
+    };
     if let Some(task) = tun_task {
         task.abort();
         let _ = task.await;
     }
-    let cleanup =
-        if config.ip.enabled { cleanup_owned_resources(&journal_path).await } else { Ok(()) };
-    match (result, cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
-        (Err(error), Err(cleanup_error)) => Err(ServerError::Transport(format!(
-            "{error}; resource cleanup failed: {cleanup_error}"
-        ))),
+    metrics.stop().await;
+    let cleanup = resources::cleanup(journal_path.as_deref()).await;
+    match (result, cleanup, control_result) {
+        (Ok(()), Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Ok(()), Err(error)) => Err(error),
+        (Ok(()), Err(error), _) => Err(error),
+        (Err(error), _, _) => Err(error),
     }
 }
 
-async fn cleanup_owned_resources(path: &Path) -> Result<(), ServerError> {
-    maskman_platform::cleanup_journal(path, false)
-        .await
-        .map(|_| ())
-        .map_err(|error| ServerError::Transport(format!("resource cleanup failed: {error}")))
-}
-
-#[cfg(target_os = "linux")]
-async fn provision_routes(
-    config: &CompiledConfig,
-    device: &maskman_platform::TunDevice,
-    journal: &mut maskman_platform::NetworkJournal,
-    journal_path: &Path,
+async fn run_servers(
+    servers: Vec<TransportServer>,
+    config_path: Option<&Path>,
+    context: &std::sync::Arc<TransportContext>,
 ) -> Result<(), ServerError> {
-    let interface_index =
-        device.interface_index().map_err(|error| ServerError::Transport(error.to_string()))?;
-    let manager = maskman_platform::LinuxRouteManager::connect()
-        .map_err(|error| ServerError::Transport(error.to_string()))?;
-    for route in [config.ip.ipv4_pool, config.ip.ipv6_pool].into_iter().flatten() {
-        manager
-            .add_route(route, interface_index, journal)
-            .await
-            .map_err(|error| ServerError::Transport(error.to_string()))?;
-        journal.persist(journal_path).map_err(|error| ServerError::Transport(error.to_string()))?;
-    }
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn provision_routes(
-    _config: &CompiledConfig,
-    _device: &maskman_platform::TunDevice,
-    _journal: &mut maskman_platform::NetworkJournal,
-    _journal_path: &Path,
-) -> Result<(), ServerError> {
-    Ok(())
-}
-
-async fn run_servers(servers: Vec<TransportServer>) -> Result<(), ServerError> {
     let shutdown = servers.iter().map(TransportServer::shutdown_handle).collect::<Vec<_>>();
     let mut tasks = JoinSet::new();
     for server in servers {
         tasks.spawn(server.run());
     }
-    tokio::select! {
-        result = tasks.join_next() => {
-            tasks.abort_all();
-            map_server_result(result.ok_or(ServerError::MissingListener)?)
-        }
-        signal = shutdown_signal() => {
-            signal?;
-            for handle in shutdown {
-                handle.shutdown();
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|error| ServerError::Signal(error.to_string()))?;
+        let mut reload = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            .map_err(|error| ServerError::Signal(error.to_string()))?;
+        let ctrl_c = tokio::signal::ctrl_c();
+        tokio::pin!(ctrl_c);
+        loop {
+            tokio::select! {
+                result = tasks.join_next() => {
+                    tasks.abort_all();
+                    return map_server_result(result.ok_or(ServerError::MissingListener)?);
+                }
+                result = &mut ctrl_c => {
+                    result.map_err(|error| ServerError::Signal(error.to_string()))?;
+                    break;
+                }
+                _ = terminate.recv() => break,
+                _ = reload.recv() => reload_config(config_path, context),
             }
-            while let Some(result) = tasks.join_next().await {
-                map_server_result(result)?;
-            }
-            Ok(())
         }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await.map_err(|error| ServerError::Signal(error.to_string()))?;
+
+    for handle in shutdown {
+        handle.shutdown();
+    }
+    while let Some(result) = tasks.join_next().await {
+        map_server_result(result)?;
+    }
+    Ok(())
+}
+
+fn reload_config(config_path: Option<&Path>, context: &TransportContext) {
+    let result = config_path
+        .ok_or_else(|| "daemon was started without a reloadable config path".to_owned())
+        .and_then(|path| maskman_config::compile(path).map_err(|error| error.to_string()))
+        .and_then(|config| context.reload(config));
+    if let Err(error) = result {
+        context.record_runtime_error(error);
     }
 }
 
@@ -237,26 +351,5 @@ fn map_server_result(
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => Err(ServerError::Transport(error.to_string())),
         Err(error) => Err(ServerError::Task(error.to_string())),
-    }
-}
-
-async fn shutdown_signal() -> Result<(), ServerError> {
-    #[cfg(unix)]
-    {
-        let mut terminate =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .map_err(|error| ServerError::Signal(error.to_string()))?;
-        tokio::select! {
-            result = tokio::signal::ctrl_c() => {
-                result.map_err(|error| ServerError::Signal(error.to_string()))?;
-            }
-            _ = terminate.recv() => {}
-        }
-        Ok(())
-    }
-
-    #[cfg(not(unix))]
-    {
-        tokio::signal::ctrl_c().await.map_err(|error| ServerError::Signal(error.to_string()))
     }
 }

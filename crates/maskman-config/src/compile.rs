@@ -76,6 +76,7 @@ pub struct CompiledIp {
     pub ipv6_pool: Option<IpNet>,
     pub advertise_routes: Vec<IpNet>,
     pub nat_managed: bool,
+    pub nat_egress_interface: String,
 }
 
 pub fn compile(
@@ -186,6 +187,7 @@ pub fn compile(
             )?,
             advertise_routes: parse_networks(&document.proxy.ip.advertise_routes)?,
             nat_managed: matches!(document.proxy.ip.nat.mode, NatMode::Managed),
+            nat_egress_interface: document.proxy.ip.nat.egress_interface.clone(),
         },
         metrics_listen,
     })

@@ -13,16 +13,16 @@ use crate::{
     output::Output,
 };
 
-pub fn run(config: Option<&Path>, command: TokenCommand, output: Output) -> Result<()> {
+pub async fn run(config: Option<&Path>, command: TokenCommand, output: Output) -> Result<()> {
     let path = require_config(config)?;
     match command {
-        TokenCommand::Create(args) => create(&path, args, output),
-        TokenCommand::Revoke(args) => revoke(&path, args, output),
+        TokenCommand::Create(args) => create(&path, args, output).await,
+        TokenCommand::Revoke(args) => revoke(&path, args, output).await,
         TokenCommand::List(args) => list(&path, args),
     }
 }
 
-fn create(path: &Path, args: TokenCreateArgs, output: Output) -> Result<()> {
+async fn create(path: &Path, args: TokenCreateArgs, output: Output) -> Result<()> {
     require_confirmation(args.yes, "create bearer token")?;
     let mut document =
         maskman_config::load(path).with_context(|| format!("loading config {}", path.display()))?;
@@ -53,18 +53,17 @@ fn create(path: &Path, args: TokenCreateArgs, output: Output) -> Result<()> {
         enabled: true,
     });
     maskman_config::validate(&document).context("validating token update")?;
-    maskman_config::write_atomic(path, &document)
-        .with_context(|| format!("writing {}", path.display()))?;
+    write_config_with_worker_access(path, &document)?;
     output.success(format!("created bearer token {id} for principal {principal}"));
     println!("Bearer token (shown once): mm_{id}_{encoded}");
     if args.reload {
-        reload_service(path)?;
+        reload_service(path).await?;
         output.success("requested service reload");
     }
     Ok(())
 }
 
-fn revoke(path: &Path, args: TokenRevokeArgs, output: Output) -> Result<()> {
+async fn revoke(path: &Path, args: TokenRevokeArgs, output: Output) -> Result<()> {
     require_confirmation(args.yes, "revoke bearer token")?;
     let mut document =
         maskman_config::load(path).with_context(|| format!("loading config {}", path.display()))?;
@@ -79,12 +78,11 @@ fn revoke(path: &Path, args: TokenRevokeArgs, output: Output) -> Result<()> {
     } else {
         token.enabled = false;
         maskman_config::validate(&document).context("validating token update")?;
-        maskman_config::write_atomic(path, &document)
-            .with_context(|| format!("writing {}", path.display()))?;
+        write_config_with_worker_access(path, &document)?;
         output.success(format!("revoked bearer token {}", args.id));
     }
     if args.reload {
-        reload_service(path)?;
+        reload_service(path).await?;
         output.success("requested service reload");
     }
     Ok(())
@@ -123,9 +121,26 @@ fn list(path: &Path, args: TokenListArgs) -> Result<()> {
     Ok(())
 }
 
-fn reload_service(path: &Path) -> Result<()> {
+async fn reload_service(path: &Path) -> Result<()> {
     let config = maskman_config::compile(path)
         .with_context(|| format!("loading config {}", path.display()))?;
+    let socket = maskman_server::control::socket_path(&config);
+    if let Some(response) = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        maskman_server::control::request(&socket, maskman_server::control::ControlCommand::Reload),
+    )
+    .await
+    .ok()
+    .and_then(|result| result.ok())
+    {
+        if response.ok {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "daemon rejected credential reload: {}",
+            response.error.as_deref().unwrap_or("unknown control error")
+        );
+    }
     let binary = std::env::current_exe().context("locating current maskman binary")?;
     let absolute =
         if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir()?.join(path) };
@@ -141,6 +156,58 @@ fn require_config(config: Option<&Path>) -> Result<PathBuf> {
         anyhow::bail!("config {} does not exist; run maskman setup first", path.display());
     }
     Ok(path)
+}
+
+fn write_config_with_worker_access(
+    path: &Path,
+    document: &maskman_config::ConfigDocument,
+) -> Result<()> {
+    let absolute = absolute_path(path)?;
+    let base_dir = absolute.parent().unwrap_or_else(|| Path::new("/"));
+    let compiled = maskman_config::compile_document(document, base_dir)
+        .with_context(|| format!("compiling updated configuration {}", path.display()))?;
+    let binary = std::env::current_exe().context("locating current maskman binary")?;
+    let spec =
+        maskman_platform::ServiceSpec::new(binary, absolute.clone(), compiled.state_dir.clone())?;
+    let installed = spec.service_path.exists();
+    if installed {
+        prepare_worker_access(&spec, &compiled)?;
+    }
+    maskman_config::write_atomic(path, document)
+        .with_context(|| format!("writing {}", path.display()))?;
+    if installed {
+        let refreshed = maskman_config::compile(&absolute)
+            .with_context(|| format!("reloading updated configuration {}", path.display()))?;
+        prepare_worker_access(&spec, &refreshed)?;
+    }
+    Ok(())
+}
+
+fn prepare_worker_access(
+    spec: &maskman_platform::ServiceSpec,
+    config: &maskman_config::CompiledConfig,
+) -> Result<()> {
+    maskman_platform::prepare_worker_access(
+        &spec.config,
+        &config.certificate_file,
+        &config.private_key_file,
+        config.client_ca_file.as_deref(),
+        &config.state_dir,
+    )
+    .map_err(|error| anyhow::anyhow!(error))
+    .context(
+        "the installed worker cannot read configuration or TLS files; run maskman install as root",
+    )
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        std::env::current_dir()
+            .context("locating current directory")
+            .map(|directory| directory.join(path))
+    }
 }
 
 fn require_confirmation(yes: bool, action: &str) -> Result<()> {

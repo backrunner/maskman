@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -16,10 +17,21 @@ pub async fn serve(config: Option<&Path>, _output: Output) -> Result<()> {
     let path = require_config(config)?;
     let compiled = maskman_config::compile(&path)
         .with_context(|| format!("loading config {}", path.display()))?;
-    maskman_server::serve(compiled).await.map_err(Into::into)
+    let path = absolute_path(&path)?;
+    maskman_server::serve_with_config_path(compiled, path).await.map_err(Into::into)
 }
 
-pub fn status(config: Option<&Path>, args: StatusArgs, output: Output) -> Result<()> {
+pub async fn worker(config: Option<&Path>) -> Result<()> {
+    let path = require_config(config)?;
+    let compiled = maskman_config::compile(&path)
+        .with_context(|| format!("loading config {}", path.display()))?;
+    let path = absolute_path(&path)?;
+    let resources = maskman_server::worker_resources_from_environment(&compiled)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    maskman_server::serve_worker_with_resources(compiled, path, resources).await.map_err(Into::into)
+}
+
+pub async fn status(config: Option<&Path>, args: StatusArgs, output: Output) -> Result<()> {
     let path = config.map(PathBuf::from).unwrap_or_else(maskman_platform::default_config_path);
     let compiled = if path.exists() {
         Some(
@@ -35,55 +47,100 @@ pub fn status(config: Option<&Path>, args: StatusArgs, output: Output) -> Result
         .map(|config| config.state_dir.clone())
         .unwrap_or_else(maskman_platform::default_state_dir);
     let spec = maskman_platform::ServiceSpec::new(binary, absolute_path(&path)?, state_dir)?;
-    let service = maskman_platform::service_status(&spec)?;
-    let (listen, connections, udp_sessions, ip_sessions) = compiled
+    let service = maskman_platform::service_status(&spec).unwrap_or_else(|error| {
+        maskman_platform::ServiceStatus {
+            installed: spec.service_path.exists(),
+            running: false,
+            pid: None,
+            detail: format!("service manager unavailable: {error}"),
+        }
+    });
+    let daemon = match compiled.as_ref() {
+        Some(config) => control_status(config).await.ok(),
+        None => None,
+    };
+    let listen = daemon
         .as_ref()
-        .map(|config| {
-            let status = maskman_server::status(config);
-            (
-                status.listen.iter().map(ToString::to_string).collect::<Vec<_>>(),
-                status.connections,
-                status.udp_sessions,
-                status.ip_sessions,
-            )
+        .map(|status| status.listen.clone())
+        .or_else(|| {
+            compiled.as_ref().map(|config| config.listen.iter().map(ToString::to_string).collect())
         })
         .unwrap_or_default();
+    let runtime = daemon.as_ref().map(|status| &status.runtime);
+    let daemon_ready = daemon.as_ref().is_some_and(|daemon| daemon.ready);
+    let connections = runtime.map_or(0, |runtime| runtime.active_connections);
+    let udp_sessions = runtime.map_or(0, |runtime| runtime.active_udp_sessions);
+    let ip_sessions = runtime.map_or(0, |runtime| runtime.active_ip_sessions);
     let config_hash =
         compiled.as_ref().and_then(|_| fs::read(&path).ok()).map(|bytes| hex_digest(&bytes));
     if args.json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "version": env!("CARGO_PKG_VERSION"),
-                "service": {
-                    "installed": service.installed,
-                    "running": service.running,
-                    "pid": service.pid,
-                    "detail": service.detail,
-                },
-                "config": {
-                    "path": path,
-                    "hash_sha256": config_hash,
-                },
-                "listen": listen,
-                "connections": connections,
-                "udp_sessions": udp_sessions,
-                "ip_sessions": ip_sessions,
-                "transport_ready": service.running,
-                "proxy_ready": service.running && compiled.is_some(),
-            })
-        );
-    } else if service.running {
+        let status = StatusOutput {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            service: ServiceOutput {
+                installed: service.installed,
+                running: service.running,
+                pid: service.pid,
+                detail: service.detail,
+            },
+            config: ConfigOutput { path, hash_sha256: config_hash },
+            listen,
+            metrics_listen: daemon.as_ref().map(|status| status.metrics_listen.clone()),
+            connections,
+            udp_sessions,
+            ip_sessions,
+            runtime: runtime.cloned(),
+            daemon: daemon.clone(),
+            transport_ready: daemon_ready,
+            proxy_ready: daemon_ready,
+        };
+        println!("{}", serde_json::to_string(&status).context("encoding status JSON")?);
+    } else if let Some(daemon) = daemon {
         output.success(format!(
-            "maskman service is running{}",
-            service.pid.map(|pid| format!(" (pid {pid})")).unwrap_or_default()
+            "maskman daemon is ready (pid {}, uptime {}s, connections {}, udp {}, ip {})",
+            daemon.pid,
+            daemon.runtime.uptime_seconds,
+            daemon.runtime.active_connections,
+            daemon.runtime.active_udp_sessions,
+            daemon.runtime.active_ip_sessions,
         ));
+    } else if service.running {
+        output.warning("maskman process is running but its control socket is unavailable");
     } else if service.installed {
         output.warning(format!("maskman service is installed but inactive ({})", service.detail));
     } else {
         output.warning("maskman service is not installed");
     }
     Ok(())
+}
+
+#[derive(Debug, Serialize)]
+struct StatusOutput {
+    version: String,
+    service: ServiceOutput,
+    config: ConfigOutput,
+    listen: Vec<String>,
+    metrics_listen: Option<String>,
+    connections: u64,
+    udp_sessions: u64,
+    ip_sessions: u64,
+    runtime: Option<maskman_server::RuntimeSnapshot>,
+    daemon: Option<maskman_server::control::DaemonStatus>,
+    transport_ready: bool,
+    proxy_ready: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ServiceOutput {
+    installed: bool,
+    running: bool,
+    pid: Option<u32>,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigOutput {
+    path: PathBuf,
+    hash_sha256: Option<String>,
 }
 
 pub fn action(name: &str, config: Option<&Path>, args: ActionArgs, output: Output) -> Result<()> {
@@ -100,10 +157,35 @@ pub fn action(name: &str, config: Option<&Path>, args: ActionArgs, output: Outpu
         "install" => {
             require_confirmation(&args, "install service")?;
             let rendered = spec.render()?;
+            maskman_server::validate_tls(&compiled)
+                .context("validating TLS certificate, private key, and client CA")?;
             if args.dry_run {
+                let identity = maskman_platform::ensure_worker_identity(true)?;
+                let identity_plan = match identity {
+                    maskman_platform::WorkerIdentityProvision::Existing => "already present",
+                    maskman_platform::WorkerIdentityProvision::Created
+                    | maskman_platform::WorkerIdentityProvision::WouldCreate => "would create",
+                };
+                println!(
+                    "worker identity {}: {}",
+                    maskman_platform::worker_identity().0,
+                    identity_plan
+                );
                 println!("service file: {}\n{}", spec.service_path.display(), rendered);
                 return Ok(());
             }
+            maskman_platform::ensure_worker_identity(false)
+                .map_err(|error| anyhow::anyhow!(error))
+                .context("creating the dedicated maskman worker identity")?;
+            maskman_platform::prepare_worker_access(
+                &spec.config,
+                &compiled.certificate_file,
+                &compiled.private_key_file,
+                compiled.client_ca_file.as_deref(),
+                &compiled.state_dir,
+            )
+            .map_err(|error| anyhow::anyhow!(error))
+            .context("preparing configuration and TLS files for the maskman worker")?;
             maskman_platform::install_service(&spec, false)?;
             output.success(format!("installed {}", spec.service_path.display()));
         }
@@ -112,11 +194,11 @@ pub fn action(name: &str, config: Option<&Path>, args: ActionArgs, output: Outpu
             maskman_platform::uninstall_service(&spec, args.dry_run)?;
             output.success("service definition removed");
         }
-        "start" | "stop" | "reload" => {
+        "start" | "stop" => {
             let action = match name {
                 "start" => maskman_platform::ServiceAction::Start,
                 "stop" => maskman_platform::ServiceAction::Stop,
-                _ => maskman_platform::ServiceAction::Reload,
+                _ => unreachable!("lifecycle action was validated"),
             };
             if args.dry_run {
                 output.info(format!("would {name} {}", spec.service_path.display()));
@@ -128,6 +210,50 @@ pub fn action(name: &str, config: Option<&Path>, args: ActionArgs, output: Outpu
         _ => anyhow::bail!("unsupported lifecycle action {name}"),
     }
     Ok(())
+}
+
+pub async fn reload(config: Option<&Path>, args: ActionArgs, output: Output) -> Result<()> {
+    let path = require_config(config)?;
+    let compiled = maskman_config::compile(&path)
+        .with_context(|| format!("validating config {}", path.display()))?;
+    if args.dry_run {
+        output.success("configuration is valid; reload was not requested");
+        return Ok(());
+    }
+    let socket = maskman_server::control::socket_path(&compiled);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        maskman_server::control::request(&socket, maskman_server::control::ControlCommand::Reload),
+    )
+    .await
+    .context("timed out waiting for daemon reload")?
+    .with_context(|| format!("contacting daemon at {}", socket.display()))?;
+    if !response.ok {
+        anyhow::bail!(
+            "daemon rejected reload: {}",
+            response.error.as_deref().unwrap_or("unknown control error")
+        );
+    }
+    let generation =
+        response.status.as_ref().map(|status| status.config_generation).unwrap_or_default();
+    output.success(format!("configuration reloaded (generation {generation})"));
+    Ok(())
+}
+
+async fn control_status(
+    config: &maskman_config::CompiledConfig,
+) -> Result<maskman_server::control::DaemonStatus> {
+    let socket = maskman_server::control::socket_path(config);
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        maskman_server::control::request(&socket, maskman_server::control::ControlCommand::Status),
+    )
+    .await
+    .context("control status timed out")??;
+    if !response.ok {
+        anyhow::bail!(response.error.unwrap_or_else(|| "control status failed".to_owned()));
+    }
+    response.status.ok_or_else(|| anyhow::anyhow!("daemon returned no status payload"))
 }
 
 pub async fn cleanup(config: Option<&Path>, args: ActionArgs, output: Output) -> Result<()> {
@@ -162,7 +288,14 @@ pub fn update(config: Option<&Path>, args: UpdateArgs, output: Output) -> Result
         .unwrap_or("backrunner/maskman");
     let client = maskman_update::UpdateClient::new(repository, env!("CARGO_PKG_VERSION"))
         .map_err(|error| anyhow::anyhow!(error))?;
-    let release = client.latest(args.version.as_deref()).map_err(|error| anyhow::anyhow!(error))?;
+    let release = match client.latest(args.version.as_deref()) {
+        Ok(release) => release,
+        Err(maskman_update::UpdateError::NoUpdateAvailable(version, target)) => {
+            output.success(format!("current {version}; no newer signed release for {target}"));
+            return Ok(());
+        }
+        Err(error) => return Err(anyhow::anyhow!(error)),
+    };
     if args.check {
         output.success(format!(
             "current {}; latest signed {} for {}",
@@ -269,7 +402,9 @@ fn hex_digest(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::require_confirmation;
+    use std::path::PathBuf;
+
+    use super::{require_confirmation, ConfigOutput, ServiceOutput, StatusOutput};
     use crate::cli::ActionArgs;
 
     #[test]
@@ -283,5 +418,42 @@ mod tests {
             .is_ok());
         assert!(require_confirmation(&ActionArgs { yes: false, dry_run: true }, "clean resources")
             .is_ok());
+    }
+
+    #[test]
+    fn status_json_schema_has_stable_operational_keys() {
+        let value = serde_json::to_value(StatusOutput {
+            version: "0.1.0".into(),
+            service: ServiceOutput {
+                installed: false,
+                running: false,
+                pid: None,
+                detail: "inactive".into(),
+            },
+            config: ConfigOutput { path: PathBuf::from("/tmp/config.toml"), hash_sha256: None },
+            listen: Vec::new(),
+            metrics_listen: None,
+            connections: 0,
+            udp_sessions: 0,
+            ip_sessions: 0,
+            runtime: None,
+            daemon: None,
+            transport_ready: false,
+            proxy_ready: false,
+        })
+        .unwrap_or_else(|error| panic!("serialize status: {error}"));
+        for key in [
+            "version",
+            "service",
+            "config",
+            "listen",
+            "connections",
+            "udp_sessions",
+            "ip_sessions",
+            "transport_ready",
+            "proxy_ready",
+        ] {
+            assert!(value.get(key).is_some(), "missing status key {key}");
+        }
     }
 }

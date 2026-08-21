@@ -1,6 +1,6 @@
 # Maskman 实现方案索引
 
-状态：M0-M3、M6 与 M7 的核心能力已有本地实现和测试；M4/M5 的 CONNECT-IP/session/platform 基础已加入，但 supervisor/worker、managed NAT、macOS route/pf 和真实 TUN 转发仍未完成；M8 本地质量门禁已验证，目标机、长稳和外部互操作证据仍待执行
+状态：M0-M3、M6 与 M7 的核心能力已有本地实现和测试；M4/M5 已加入 CONNECT-IP/session、受限 control/metrics、Linux nftables 与 macOS route/pf 适配、持久化资源 journal、supervisor/worker fd 隔离和服务 hardening；目标机特权转发、macOS utun/pf smoke 和外部 release gate 仍未完成；M8 本地质量门禁已验证，目标机、长稳和外部互操作证据仍待执行
 调研基线：2026-08-20
 目标：单一 Rust 二进制，作为长期运行的 MASQUE daemon，同时提供安装、配置、生命周期管理和自更新 CLI。
 

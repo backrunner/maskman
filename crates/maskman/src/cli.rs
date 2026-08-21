@@ -41,6 +41,8 @@ pub enum Command {
     Reload(ActionArgs),
     Update(UpdateArgs),
     Version,
+    #[command(hide = true)]
+    Worker,
 }
 
 #[derive(Debug, Args)]
@@ -87,6 +89,8 @@ pub struct SetupArgs {
     pub advertise_routes: Vec<String>,
     #[arg(long, value_enum, default_value_t = NatModeArg::Disabled)]
     pub nat_mode: NatModeArg,
+    #[arg(long, default_value = "auto")]
+    pub nat_interface: String,
 }
 
 #[derive(Debug, Subcommand)]
@@ -94,6 +98,10 @@ pub enum ConfigCommand {
     Validate {
         #[arg(long)]
         check_system: bool,
+    },
+    Migrate {
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

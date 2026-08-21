@@ -1,28 +1,19 @@
 use std::{
-    net::SocketAddr,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
-    },
+    net::{SocketAddr, UdpSocket},
+    sync::Arc,
     time::Duration,
 };
 
 use bytes::Bytes;
-use maskman_config::CompiledConfig;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::{
-    sync::{mpsc, watch},
-    task::JoinSet,
-};
+use tokio::{sync::watch, task::JoinSet};
 
-use crate::{
-    datagram,
-    proxy::{address_pool::AddressPoolSet, ip::IpSessionRegistry},
-    request,
-    session::{QuotaState, SessionRegistry},
-    tls,
-};
+use crate::{datagram, request, session::SessionRegistry, stats::ActivityKind, tls};
+
+#[path = "transport_context.rs"]
+mod context;
+pub use context::TransportContext;
 
 #[derive(Debug, Error)]
 pub enum TransportError {
@@ -64,43 +55,6 @@ pub struct TransportServer {
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
     context: Option<Arc<TransportContext>>,
-}
-
-pub struct TransportContext {
-    pub(crate) config: Arc<CompiledConfig>,
-    pub(crate) quotas: Arc<QuotaState>,
-    pub(crate) ip_registry: Arc<IpSessionRegistry>,
-    pub(crate) address_pools: Arc<AddressPoolSet>,
-    pub(crate) tun_tx: mpsc::Sender<Bytes>,
-    tun_rx: Mutex<Option<mpsc::Receiver<Bytes>>>,
-    next_connection_id: AtomicU64,
-}
-
-impl TransportContext {
-    pub fn new(config: Arc<CompiledConfig>) -> Self {
-        let (tun_tx, tun_rx) = mpsc::channel(64);
-        Self {
-            address_pools: Arc::new(AddressPoolSet::from_config(&config.ip)),
-            config,
-            quotas: Arc::new(QuotaState::default()),
-            ip_registry: Arc::new(IpSessionRegistry::default()),
-            tun_tx,
-            tun_rx: Mutex::new(Some(tun_rx)),
-            next_connection_id: AtomicU64::new(1),
-        }
-    }
-
-    pub fn take_tun_receiver(&self) -> Option<mpsc::Receiver<Bytes>> {
-        self.tun_rx.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
-    }
-
-    pub fn dispatch_tun_packet(&self, payload: Bytes) -> bool {
-        self.ip_registry.dispatch_tun(payload).is_ok()
-    }
-
-    fn next_connection_id(&self) -> u64 {
-        self.next_connection_id.fetch_add(1, Ordering::Relaxed)
-    }
 }
 
 #[derive(Clone)]
@@ -148,6 +102,36 @@ impl TransportServer {
         Ok(server)
     }
 
+    /// Bind an endpoint around a socket opened by the supervisor. Keeping the
+    /// socket creation outside this adapter is what lets the worker run after
+    /// it has been reduced to the dedicated service identity.
+    pub fn bind_with_socket(
+        socket: UdpSocket,
+        mut server_config: quinn::ServerConfig,
+        limits: TransportLimits,
+        mode: TransportMode,
+        context: Arc<TransportContext>,
+    ) -> Result<Self, TransportError> {
+        configure_transport(&mut server_config, limits)?;
+        let endpoint = quinn::Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(server_config),
+            socket,
+            Arc::new(quinn::TokioRuntime),
+        )?;
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        Ok(Self {
+            endpoint,
+            max_connections: limits.max_connections,
+            max_header_bytes: limits.max_header_bytes,
+            mode,
+            drain_timeout: limits.drain_timeout,
+            shutdown_tx,
+            shutdown_rx,
+            context: Some(context),
+        })
+    }
+
     pub fn local_addr(&self) -> Result<SocketAddr, TransportError> {
         self.endpoint.local_addr().map_err(TransportError::Bind)
     }
@@ -182,13 +166,13 @@ impl TransportServer {
                     });
                 }
                 completed = connections.join_next(), if !connections.is_empty() => {
-                    observe_connection_result(completed);
+                    observe_connection_result(completed, self.context.as_deref());
                 }
             }
         }
 
         self.shutdown_tx.send_replace(true);
-        drain_connections(&mut connections, self.drain_timeout).await;
+        drain_connections(&mut connections, self.drain_timeout, self.context.as_deref()).await;
         self.endpoint.close(0u32.into(), b"maskman shutdown");
         self.endpoint.wait_idle().await;
         Ok(())
@@ -197,17 +181,24 @@ impl TransportServer {
 
 fn observe_connection_result(
     _result: Option<Result<Result<(), TransportError>, tokio::task::JoinError>>,
+    context: Option<&TransportContext>,
 ) {
-    // Metrics and structured logging are attached here when observability lands.
+    let Some(context) = context else { return };
+    match _result {
+        Some(Ok(Err(error))) => context.record_runtime_error(error.to_string()),
+        Some(Err(error)) => context.record_runtime_error(error.to_string()),
+        _ => {}
+    }
 }
 
 async fn drain_connections(
     connections: &mut JoinSet<Result<(), TransportError>>,
     drain_timeout: Duration,
+    context: Option<&TransportContext>,
 ) {
     let drain = async {
         while let Some(result) = connections.join_next().await {
-            observe_connection_result(Some(result));
+            observe_connection_result(Some(result), context);
         }
     };
     if tokio::time::timeout(drain_timeout, drain).await.is_err() {
@@ -264,6 +255,7 @@ async fn handle_connection(
     context: Option<Arc<TransportContext>>,
 ) -> Result<(), TransportError> {
     let connection = incoming.await?;
+    let _activity = context.as_ref().map(|context| context.stats.begin(ActivityKind::Connection));
     let peer_certificate_sha256 = peer_certificate_sha256(&connection);
     let datagram_connection = connection.clone();
     let connection_id = context.as_ref().map(|context| context.next_connection_id());
@@ -311,7 +303,7 @@ async fn drive_connection(
             request = http3.accept() => match request? {
                 Some(resolver) => {
                     let request_context = context.as_ref().map(|context| request::RequestContext {
-                        config: context.config.clone(),
+                        config: context.config_snapshot(),
                         registry: registry.clone(),
                         quotas: context.quotas.clone(),
                         ip_registry: context.ip_registry.clone(),
@@ -320,9 +312,15 @@ async fn drive_connection(
                         connection: datagram_connection.clone(),
                         connection_id: connection_id.unwrap_or_default(),
                         peer_certificate_sha256,
+                        stats: context.stats.clone(),
                     });
+                    let stats = context.as_ref().map(|context| context.stats.clone());
                     tokio::spawn(async move {
-                        let _ = request::handle(resolver, request_mode(mode), request_context).await;
+                        if let Err(error) = request::handle(resolver, request_mode(mode), request_context).await {
+                            if let Some(stats) = stats {
+                                stats.record_error(error.to_string());
+                            }
+                        }
                     });
                 }
                 None => return Ok(()),
@@ -335,7 +333,7 @@ async fn drive_connection(
                 if context.is_some() {
                     forward_datagram(
                         &registry,
-                        context.as_ref().map(|context| context.ip_registry.as_ref()),
+                        context.as_deref(),
                         connection_id.unwrap_or_default(),
                         datagram.stream_id,
                         datagram.payload,
@@ -354,7 +352,7 @@ async fn drive_connection(
 
 fn forward_datagram(
     registry: &SessionRegistry,
-    ip_registry: Option<&IpSessionRegistry>,
+    context: Option<&TransportContext>,
     connection_id: u64,
     stream_id: u64,
     payload: Bytes,
@@ -366,9 +364,21 @@ fn forward_datagram(
         return;
     }
     let payload = Bytes::copy_from_slice(datagram.payload);
-    if registry.try_send(stream_id, payload.clone()).is_none() {
-        if let Some(ip_registry) = ip_registry {
-            let _ = ip_registry.try_send(connection_id, stream_id, payload);
+    match registry.try_send(stream_id, payload.clone()) {
+        Some(forwarded) => {
+            if let Some(context) = context {
+                context.stats.packet_result(forwarded);
+            }
+        }
+        None => {
+            if let Some(context) = context {
+                if let Err(reason) = context.ip_registry.try_send(connection_id, stream_id, payload)
+                {
+                    if matches!(reason, crate::proxy::ip::IpDropReason::Destination) {
+                        context.stats.packet_result(false);
+                    }
+                }
+            }
         }
     }
 }
