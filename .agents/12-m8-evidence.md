@@ -14,7 +14,7 @@ release gate 通过。
 | 依赖 | `cargo deny check` 通过；`cargo audit` 仅保留已记录的 `paste` unmaintained allow；`cargo machete 0.9.2` 未发现 unused dependencies |
 | Compliance | `cargo xtask compliance` 通过，共 43 条 cumulative requirements |
 | Fuzz | 8 个 target 各完成 100,000 runs，`rss_limit_mb=1024`、`malloc_limit_mb=64`，无 crash |
-| Codec benchmark | Rust 1.97.1 release、9 synthetic HTTP/video/mixed rows、p50/p95/p99、ops/s 和 bytes/s 已写入 `benchmarks/baseline.csv`；这是本机 codec/packet pipeline smoke，不是端到端容量承诺 |
+| Codec benchmark | Rust 1.97.1 release、扩展后的 HTTP/video/mixed payload matrix（含 64B 至 65,527B）、p50/p95/p99、ops/s 和 bytes/s 已写入 `benchmarks/baseline.csv`；这是本机 codec/packet pipeline smoke，不是端到端容量承诺 |
 | Signing command | 临时 Ed25519 key 完成 OpenSSL `pkeyutl -sign/-verify -rawin`，并验证 DER 末 32 字节公钥提取；临时 key 已删除；未注入生产公钥的构建会禁用 update |
 | Target compile | Rust 1.88 locked release build 通过：x86_64 Linux musl、aarch64 Linux musl、aarch64 macOS |
 

@@ -55,17 +55,17 @@ struct TrafficProfile {
 const HTTP_PROFILE: TrafficProfile = TrafficProfile {
     name: "http",
     transport: Transport::Tcp,
-    defaults: &[256, 1_024, 4_096, 16_384],
+    defaults: &[64, 512, 1_200, 4_096, 16_384, 65_527],
 };
 const VIDEO_PROFILE: TrafficProfile = TrafficProfile {
     name: "video",
     transport: Transport::Udp,
-    defaults: &[1_200, 4_096, 16_384, 32_768],
+    defaults: &[1_200, 4_096, 16_384, 32_768, 65_527],
 };
 const MIXED_PROFILE: TrafficProfile = TrafficProfile {
     name: "mixed",
     transport: Transport::Udp,
-    defaults: &[64, 512, 1_200, 4_096, 16_384],
+    defaults: &[64, 512, 1_200, 4_096, 16_384, 65_527],
 };
 
 pub fn run(
@@ -309,7 +309,7 @@ fn checksum(header: &[u8]) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_payloads, parse_profiles};
+    use super::{parse_payloads, parse_profiles, HTTP_PROFILE, VIDEO_PROFILE};
 
     #[test]
     fn payload_parser_deduplicates_and_bounds_values() {
@@ -324,5 +324,13 @@ mod tests {
         assert_eq!(parse_profiles("all").unwrap_or_default().len(), 3);
         assert_eq!(parse_profiles("http,mixed,http").unwrap_or_default().len(), 2);
         assert!(parse_profiles("icmp").is_err());
+    }
+
+    #[test]
+    fn default_profiles_cover_mtu_and_large_transfer_sizes() {
+        assert!(HTTP_PROFILE.defaults.contains(&64));
+        assert!(HTTP_PROFILE.defaults.contains(&65_527));
+        assert!(VIDEO_PROFILE.defaults.contains(&32_768));
+        assert!(VIDEO_PROFILE.defaults.contains(&65_527));
     }
 }
