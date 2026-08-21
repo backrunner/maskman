@@ -1,16 +1,16 @@
 # M8 质量与发布证据
 
 本文件区分本 checkout 已执行的本地验证、CI 中可重复的自动门禁和仍需
-目标环境的 release blocker。记录日期为 2026-08-22，基线提交为
-`c1885fb`；当前工作树包含 supervisor/worker、journal transaction 和
-平台 hardening 改动，尚未形成最终 release commit。
+目标环境的 release blocker。记录日期为 2026-08-22；当前 checkout 包含
+supervisor/worker、journal transaction 和平台 hardening 改动。本记录不等同于
+release gate 通过。
 
 ## 本地已验证
 
 | 项目 | 结果 |
 | --- | --- |
 | 格式与静态检查 | `cargo fmt --all -- --check`、ShellCheck、actionlint、shell syntax、workflow YAML 和 `git diff --check` 通过 |
-| Workspace | stable clippy 通过；`cargo test --workspace --locked --all-targets` 通过，共 132 tests |
+| Workspace | stable clippy 通过；`cargo test --workspace --locked --all-targets` 通过，共 137 tests |
 | 依赖 | `cargo deny check` 通过；`cargo audit` 仅保留已记录的 `paste` unmaintained allow；`cargo machete 0.9.2` 未发现 unused dependencies |
 | Compliance | `cargo xtask compliance` 通过，共 43 条 cumulative requirements |
 | Fuzz | 8 个 target 各完成 100,000 runs，`rss_limit_mb=1024`、`malloc_limit_mb=64`，无 crash |
