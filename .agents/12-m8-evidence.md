@@ -14,7 +14,7 @@ release gate 通过。
 | 依赖 | `cargo deny check` 通过；`cargo audit` 仅保留已记录的 `paste` unmaintained allow；`cargo machete 0.9.2` 未发现 unused dependencies |
 | Compliance | `cargo xtask compliance` 通过，共 43 条 cumulative requirements |
 | Fuzz | 8 个 target 各完成 100,000 runs，`rss_limit_mb=1024`、`malloc_limit_mb=64`，无 crash |
-| Codec benchmark | Rust 1.88 release、100,000 iterations、8 ms、36,466,591 combined codec/packet ops/s；这是本机 smoke，不是端到端容量承诺 |
+| Codec benchmark | Rust 1.97.1 release、9 synthetic HTTP/video/mixed rows、p50/p95/p99、ops/s 和 bytes/s 已写入 `benchmarks/baseline.csv`；这是本机 codec/packet pipeline smoke，不是端到端容量承诺 |
 | Signing command | 临时 Ed25519 key 完成 OpenSSL `pkeyutl -sign/-verify -rawin`，并验证 DER 末 32 字节公钥提取；临时 key 已删除；未注入生产公钥的构建会禁用 update |
 | Target compile | Rust 1.88 locked release build 通过：x86_64 Linux musl、aarch64 Linux musl、aarch64 macOS |
 
@@ -29,8 +29,10 @@ artifact 已删除。随后全部 target 使用修订后的双重限制完成 10
 
 ## 已加入的可重复入口
 
-- `cargo xtask benchmark --iterations N` 覆盖 capsule、HTTP Datagram 和 IPv4
-  packet parse，并输出固定字段。
+- `cargo xtask benchmark --iterations N --profiles http,video,mixed --payloads
+  64,512,1200 --output benchmarks/baseline.csv` 覆盖 HTTP/TCP、video/UDP、mixed
+  TCP/UDP 的合成流量形状，并输出可追溯 CSV 基线；CPU、governor、RSS 通过
+  `MASKMAN_BENCH_*` 环境变量记录。
 - `fuzz/` 包含 capsule、datagram、CONNECT path、IPv4、IPv6、route 和
   TOML/JSON config targets，以及小型 checked-in seed corpus。
 - `scripts/namespace-smoke.sh` 创建 Linux client/proxy/target 双栈拓扑，但
