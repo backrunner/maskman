@@ -1,1 +1,10 @@
-commit,target,rust,payload_bytes,iterations,elapsed_ms,ops_per_second,cpu_percent,rss_bytes,notes
+commit,target,rust,cpu,governor,rss_bytes,profile,transport,payload_bytes,iterations,elapsed_ns,elapsed_ms,ops_per_second,bytes_per_second,p50_ns,p95_ns,p99_ns,checksum,notes
+fb257d2,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,http,tcp,64,100000,16103625,16.104,18629345,397426045,125,167,208,3700000,codec+packet pipeline; sampled latency; synthetic traffic profile
+fb257d2,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,http,tcp,512,100000,9929208,9.929,30213890,5156503922,83,84,84,3700000,codec+packet pipeline; sampled latency; synthetic traffic profile
+fb257d2,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,http,tcp,1200,100000,11982292,11.982,25036946,10014778474,84,125,125,3700000,codec+packet pipeline; sampled latency; synthetic traffic profile
+fb257d2,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,video,udp,64,100000,8044459,8.044,49723666,795578670,42,84,84,10100000,codec+packet pipeline; sampled latency; synthetic traffic profile
+fb257d2,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,video,udp,512,100000,9880833,9.881,40482416,5181749352,83,84,84,54900000,codec+packet pipeline; sampled latency; synthetic traffic profile
+fb257d2,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,video,udp,1200,100000,12111000,12.111,33027825,9908347783,84,125,125,123700000,codec+packet pipeline; sampled latency; synthetic traffic profile
+fb257d2,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,mixed,tcp,64,100000,8205000,8.205,36563071,780012187,42,84,84,3700000,codec+packet pipeline; sampled latency; synthetic traffic profile
+fb257d2,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,mixed,udp,512,100000,9979542,9.980,40081999,5130495968,83,84,125,54900000,codec+packet pipeline; sampled latency; synthetic traffic profile
+fb257d2,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,mixed,udp,1200,100000,11913833,11.914,33574417,10072325170,84,125,125,123700000,codec+packet pipeline; sampled latency; synthetic traffic profile
