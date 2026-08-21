@@ -22,6 +22,17 @@ jobs:
       - run: cargo machete
       - run: cargo run --locked -p xtask -- compliance
       - run: cargo run --locked -p xtask -- benchmark --iterations 100000
+      - name: Exercise non-interactive development setup
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_dir="$(mktemp -d)"
+          trap 'rm -rf "$smoke_dir"' EXIT
+          cargo run --locked -p maskman -- --color never setup \
+            --non-interactive --development --enable-udp --yes \
+            --output "$smoke_dir/config.toml" > "$smoke_dir/setup.log"
+          cargo run --locked -p maskman -- --color never \
+            --config "$smoke_dir/config.toml" config validate > "$smoke_dir/validate.log"
 
   msrv:
     runs-on: ubuntu-latest
