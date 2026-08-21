@@ -1,10 +1,18 @@
 commit,target,rust,cpu,governor,rss_bytes,profile,transport,payload_bytes,iterations,elapsed_ns,elapsed_ms,ops_per_second,bytes_per_second,p50_ns,p95_ns,p99_ns,checksum,notes
-4a62727,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,http,tcp,64,100000,38055333,38.055,7883257,168176166,125,167,208,10500000,codec+packet pipeline; sampled latency; synthetic traffic profile
-4a62727,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,http,tcp,512,100000,17451625,17.452,17190376,2933824214,125,167,208,55300000,codec+packet pipeline; sampled latency; synthetic traffic profile
-4a62727,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,http,tcp,1200,100000,17380500,17.381,17260723,6904289289,125,167,208,124100000,codec+packet pipeline; sampled latency; synthetic traffic profile
-4a62727,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,video,udp,64,100000,10700000,10.700,37383177,598130841,83,84,84,15700000,codec+packet pipeline; sampled latency; synthetic traffic profile
-4a62727,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,video,udp,512,100000,13020042,13.020,30721867,3932398989,84,125,125,105300000,codec+packet pipeline; sampled latency; synthetic traffic profile
-4a62727,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,video,udp,1200,100000,12355250,12.355,32374901,9712470407,84,125,125,242900000,codec+packet pipeline; sampled latency; synthetic traffic profile
-4a62727,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,mixed,tcp,64,100000,8770458,8.770,34205739,729722438,83,84,84,10500000,codec+packet pipeline; sampled latency; synthetic traffic profile
-4a62727,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,mixed,udp,512,100000,11228750,11.229,35622843,4559723922,83,125,125,105300000,codec+packet pipeline; sampled latency; synthetic traffic profile
-4a62727,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,mixed,udp,1200,100000,12114292,12.114,33018850,9905655237,84,125,125,242900000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,http,tcp,64,100000,8394959,8.395,35735731,762362270,42,84,84,10500000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,http,tcp,512,100000,9968167,9.968,30095803,5136350544,83,84,84,55300000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,http,tcp,1200,100000,12117583,12.118,24757412,9902964972,84,125,125,124100000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,http,tcp,4096,100000,17456458,17.456,17185616,23464095637,166,167,167,413700000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,http,tcp,16384,100000,50928875,50.929,5890567,32170355225,500,500,583,1642500000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,http,tcp,65527,100000,199122709,199.123,1506608,32907848797,1958,2083,2292,6553600000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,video,udp,1200,100000,12058167,12.058,33172537,9951761324,84,125,125,242900000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,video,udp,4096,100000,17419375,17.419,22962936,23514046858,166,167,167,822100000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,video,udp,16384,100000,50773583,50.774,7878112,32268748888,500,500,542,3279700000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,video,udp,32768,100000,80998166,80.998,4938383,40455236974,792,833,875,6556500000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,video,udp,65527,100000,195978958,195.979,2041035,33435732421,1917,2000,2208,13106300000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,mixed,tcp,64,100000,8313833,8.314,36084439,769801365,42,84,84,10500000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,mixed,udp,512,100000,9998334,9.998,40006665,5120853134,83,84,84,105300000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,mixed,udp,1200,100000,12003000,12.003,33325002,9997500624,84,125,125,242900000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,mixed,tcp,4096,100000,17063833,17.064,17581044,24003985505,166,167,208,413700000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,mixed,udp,16384,100000,51130917,51.131,7823055,32043235211,500,541,583,3279700000,codec+packet pipeline; sampled latency; synthetic traffic profile
+8a61384,aarch64-apple-darwin,1.97.1,Apple M4,managed,unknown,mixed,udp,65527,100000,198720125,198.720,2012881,32974516295,1958,2083,2334,13106300000,codec+packet pipeline; sampled latency; synthetic traffic profile
