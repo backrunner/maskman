@@ -166,11 +166,16 @@ fn run_payload(
     transport: Transport,
     payload_bytes: usize,
 ) -> Result<BenchmarkResult, String> {
-    let payload = vec![0x42; payload_bytes];
+    let fill = match profile {
+        "http" => 0x48,
+        "video" => 0x56,
+        _ => 0x4d,
+    };
+    let payload = vec![fill; payload_bytes];
     let mut datagram = Vec::with_capacity(payload_bytes + 8);
     encode_datagram(0, &payload, &mut datagram).map_err(|error| error.to_string())?;
     let capsule = Capsule { capsule_type: 0, value: datagram.clone() };
-    let packet = ipv4_fixture();
+    let packet = ipv4_fixture(transport, payload_bytes);
     let mut encoded = Vec::with_capacity(payload_bytes + 16);
 
     for _ in 0..iterations.min(WARMUP_ITERATIONS) {
@@ -275,13 +280,15 @@ elapsed_ns,elapsed_ms,ops_per_second,bytes_per_second,p50_ns,p95_ns,p99_ns,check
         .map_err(|error| format!("writing benchmark CSV {}: {error}", path.display()))
 }
 
-fn ipv4_fixture() -> Vec<u8> {
-    let mut packet = vec![0u8; 20 + 16];
+fn ipv4_fixture(transport: Transport, payload_bytes: usize) -> Vec<u8> {
+    let l4_header_bytes = if matches!(transport, Transport::Tcp) { 20 } else { 8 };
+    let packet_payload = payload_bytes.min(65_535 - 20 - l4_header_bytes);
+    let mut packet = vec![0u8; 20 + l4_header_bytes + packet_payload];
     packet[0] = 0x45;
     let packet_len = packet.len() as u16;
     packet[2..4].copy_from_slice(&packet_len.to_be_bytes());
     packet[8] = 64;
-    packet[9] = 17;
+    packet[9] = if matches!(transport, Transport::Tcp) { 6 } else { 17 };
     packet[12..16].copy_from_slice(&[100, 96, 0, 2]);
     packet[16..20].copy_from_slice(&[8, 8, 8, 8]);
     let header_checksum = checksum(&packet[..20]);
