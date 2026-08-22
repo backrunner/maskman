@@ -18,8 +18,11 @@ fn systemd_template_has_hardening_and_absolute_exec() {
     let output = render_systemd(&spec());
     assert!(output.contains("NoNewPrivileges=true"));
     assert!(output.contains("Environment=MASKMAN_ROLE=supervisor"));
+    assert!(output.contains("Group=maskman"));
+    assert!(output.contains("StateDirectoryMode=0770"));
     assert!(output.contains("KillMode=control-group"));
     assert!(output.contains("DeviceAllow=/dev/net/tun rw"));
+    assert!(output.contains("RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK"));
     assert!(output.contains("ExecStart=\"/usr/local/bin/maskman\""));
     assert!(!output.contains("sh -c"));
 }

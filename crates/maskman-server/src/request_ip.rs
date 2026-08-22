@@ -19,6 +19,18 @@ use crate::{
 
 const MAX_CAPSULE_VALUE_BYTES: usize = 65_535;
 
+struct IpRegistration {
+    registry: Arc<ip::IpSessionRegistry>,
+    connection_id: u64,
+    stream_id: u64,
+}
+
+impl Drop for IpRegistration {
+    fn drop(&mut self) {
+        self.registry.remove(self.connection_id, self.stream_id);
+    }
+}
+
 pub async fn handle(
     request: Request<()>,
     mut stream: h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
@@ -71,7 +83,8 @@ pub async fn handle(
             .await;
         }
     }
-    let scope = match resolver::resolve_ip_scope(parsed_scope, &policy).await {
+    let scope = match resolver::resolve_ip_scope(parsed_scope, &policy, &context.dns_permits).await
+    {
         Ok(scope) => scope,
         Err(error) => return request::reject_resolver(stream, error).await,
     };
@@ -106,28 +119,27 @@ pub async fn handle(
         .await;
     };
     let stream_id = stream.id().into_inner();
-    if !context.ip_registry.insert(context.connection_id, stream_id, session.handle.clone()) {
-        drop(quota);
-        return request::reject(
-            stream,
-            StatusCode::SERVICE_UNAVAILABLE,
-            request::ProxyError::ProxyInternalError,
-        )
-        .await;
-    }
-    let _activity = context.stats.begin(crate::stats::ActivityKind::IpSession);
     let result = async {
         ensure_ipv6_capacity(&context.connection, stream_id, &session.handle)?;
         let assigned = session.handle.initial_assignment_capsule()?;
-        stream
-            .send_response(request::response(StatusCode::OK, true))
-            .await
-            .map_err(RequestError::Response)?;
-        send_capsule(&mut stream, capsule::ADDRESS_ASSIGN_CAPSULE, assigned).await?;
         let routes = session
             .handle
             .route_advertisement(&context.config.ip.advertise_routes)
             .map_err(ip::IpControlError::from)?;
+        stream
+            .send_response(request::response(StatusCode::OK, true))
+            .await
+            .map_err(RequestError::Response)?;
+        if !context.ip_registry.insert(context.connection_id, stream_id, session.handle.clone()) {
+            return Err(RequestError::SessionRegistryConflict);
+        }
+        let _registration = IpRegistration {
+            registry: context.ip_registry.clone(),
+            connection_id: context.connection_id,
+            stream_id,
+        };
+        let _activity = context.stats.begin(crate::stats::ActivityKind::IpSession);
+        send_capsule(&mut stream, capsule::ADDRESS_ASSIGN_CAPSULE, assigned).await?;
         if !routes.ranges().is_empty() {
             let mut encoded = Vec::new();
             capsule::encode_route_advertisement(&routes, &mut encoded)
@@ -149,7 +161,6 @@ pub async fn handle(
     if result.is_err() {
         stream.stop_stream(h3::error::Code::H3_MESSAGE_ERROR);
     }
-    context.ip_registry.remove(context.connection_id, stream_id);
     drop(session);
     drop(quota);
     result

@@ -9,8 +9,8 @@ use std::{
 use tokio::io::AsyncWriteExt;
 
 use super::{
-    read_frame, request, socket_path, start, validate_socket_path, ControlCommand, ControlError,
-    ControlRequest, MAX_CONTROL_MESSAGE_BYTES,
+    prepare_socket, read_frame, request, request_blocking, socket_path, start,
+    validate_socket_path, ControlCommand, ControlError, ControlRequest, MAX_CONTROL_MESSAGE_BYTES,
 };
 use crate::TransportContext;
 
@@ -147,6 +147,68 @@ async fn control_socket_is_private_and_non_socket_paths_are_preserved() {
         .permissions()
         .mode();
     assert_eq!(mode & 0o777, 0o600);
+    handle.stop().await.unwrap_or_else(|error| panic!("stop control: {error}"));
+    std::fs::remove_dir_all(root).unwrap_or_else(|error| panic!("remove root: {error}"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn existing_group_writable_state_directory_is_preserved() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = short_test_root();
+    std::fs::create_dir_all(&root).unwrap_or_else(|error| panic!("create root: {error}"));
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o770))
+        .unwrap_or_else(|error| panic!("set state directory permissions: {error}"));
+    let path = root.join("control.sock");
+
+    prepare_socket(&path).await.unwrap_or_else(|error| panic!("prepare socket: {error}"));
+
+    let mode = std::fs::metadata(&root)
+        .unwrap_or_else(|error| panic!("stat state directory: {error}"))
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o770);
+    std::fs::remove_dir_all(root).unwrap_or_else(|error| panic!("remove root: {error}"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn existing_world_writable_state_directory_is_rejected() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = short_test_root();
+    std::fs::create_dir_all(&root).unwrap_or_else(|error| panic!("create root: {error}"));
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o777))
+        .unwrap_or_else(|error| panic!("set state directory permissions: {error}"));
+
+    assert!(matches!(
+        prepare_socket(&root.join("control.sock")).await,
+        Err(ControlError::UnsafeSocketPath(_))
+    ));
+    std::fs::remove_dir_all(root).unwrap_or_else(|error| panic!("remove root: {error}"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn blocking_control_request_validates_daemon_status() {
+    let root = short_test_root();
+    std::fs::create_dir_all(&root).unwrap_or_else(|error| panic!("create root: {error}"));
+    let (config_path, context) = test_context(&root);
+    let path = socket_path(&context.config_snapshot());
+    let handle = start(path.clone(), Some(config_path), context)
+        .await
+        .unwrap_or_else(|error| panic!("start control: {error}"));
+
+    let response = tokio::task::spawn_blocking(move || {
+        request_blocking(&path, ControlCommand::Status, std::time::Duration::from_secs(1))
+    })
+    .await
+    .unwrap_or_else(|error| panic!("join blocking request: {error}"))
+    .unwrap_or_else(|error| panic!("blocking request: {error}"));
+
+    assert!(response.ok);
+    assert!(response.status.is_some_and(|status| status.ready));
     handle.stop().await.unwrap_or_else(|error| panic!("stop control: {error}"));
     std::fs::remove_dir_all(root).unwrap_or_else(|error| panic!("remove root: {error}"));
 }

@@ -13,6 +13,8 @@ use crate::{
     output::Output,
 };
 
+use super::update_service::PlatformService;
+
 pub async fn serve(config: Option<&Path>, _output: Output) -> Result<()> {
     let path = require_config(config)?;
     let compiled = maskman_config::compile(&path)
@@ -329,10 +331,12 @@ pub fn update(config: Option<&Path>, args: UpdateArgs, output: Output) -> Result
             let spec = maskman_platform::ServiceSpec::new(
                 binary.clone(),
                 absolute_path(path)?,
-                compiled.state_dir,
+                compiled.state_dir.clone(),
             )?;
             let status = maskman_platform::service_status(&spec)?;
-            status.installed.then_some(PlatformService { spec })
+            status
+                .installed
+                .then(|| PlatformService::new(spec, &compiled, release.version.to_string()))
         }
         None => None,
     };
@@ -347,28 +351,6 @@ pub fn update(config: Option<&Path>, args: UpdateArgs, output: Output) -> Result
     .map_err(|error| anyhow::anyhow!(error))?;
     output.success(format!("updated maskman to {}", outcome.version));
     Ok(())
-}
-
-struct PlatformService {
-    spec: maskman_platform::ServiceSpec,
-}
-
-impl maskman_update::ServiceController for PlatformService {
-    fn stop(&self) -> Result<(), maskman_update::UpdateError> {
-        maskman_platform::service_control(&self.spec, maskman_platform::ServiceAction::Stop)
-            .map_err(|error| maskman_update::UpdateError::Health(error.to_string()))
-    }
-
-    fn start(&self) -> Result<(), maskman_update::UpdateError> {
-        maskman_platform::service_control(&self.spec, maskman_platform::ServiceAction::Start)
-            .map_err(|error| maskman_update::UpdateError::Health(error.to_string()))
-    }
-
-    fn healthy(&self) -> Result<bool, maskman_update::UpdateError> {
-        maskman_platform::service_status(&self.spec)
-            .map(|status| status.running)
-            .map_err(|error| maskman_update::UpdateError::Health(error.to_string()))
-    }
 }
 
 fn require_config(config: Option<&Path>) -> Result<PathBuf> {

@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, net::SocketAddr, time::Duration};
 
 use maskman_protocol::connect::{IpScope, IpTarget, TargetHost, UdpTarget};
 use thiserror::Error;
-use tokio::{net::lookup_host, time::timeout};
+use tokio::{net::lookup_host, sync::Semaphore, time::timeout};
 
 use crate::{
     policy::{EffectivePolicy, PolicyError},
@@ -14,6 +14,8 @@ const MAX_DNS_ADDRESSES: usize = 32;
 
 #[derive(Debug, Error)]
 pub enum ResolveError {
+    #[error("DNS resolver is at capacity")]
+    Busy,
     #[error("DNS resolution failed")]
     Dns,
     #[error("resolved target is not allowed by policy")]
@@ -23,6 +25,7 @@ pub enum ResolveError {
 pub async fn resolve_ip_scope(
     scope: IpScope,
     policy: &EffectivePolicy,
+    dns_permits: &Semaphore,
 ) -> Result<AuthorizedIpScope, ResolveError> {
     let protocol = scope.protocol;
     match scope.target {
@@ -32,7 +35,7 @@ pub async fn resolve_ip_scope(
             Ok(AuthorizedIpScope::prefix(prefix, protocol))
         }
         IpTarget::Name(name) => {
-            let addresses = lookup_addresses(&name, 0).await?;
+            let addresses = lookup_addresses(&name, 0, dns_permits).await?;
             let mut allowed = addresses
                 .into_iter()
                 .map(|address| address.ip())
@@ -49,6 +52,7 @@ pub async fn resolve_udp_target(
     target: &UdpTarget,
     policy: &EffectivePolicy,
     prefer_ipv6: bool,
+    dns_permits: &Semaphore,
 ) -> Result<SocketAddr, ResolveError> {
     match &target.host {
         TargetHost::Ip(address) => {
@@ -58,7 +62,7 @@ pub async fn resolve_udp_target(
             Ok(SocketAddr::new(*address, target.port))
         }
         TargetHost::Name(name) => {
-            let mut allowed = lookup_addresses(name, target.port)
+            let mut allowed = lookup_addresses(name, target.port, dns_permits)
                 .await?
                 .into_iter()
                 .filter(|address| policy.authorize_destination(address.ip()).is_ok())
@@ -69,7 +73,12 @@ pub async fn resolve_udp_target(
     }
 }
 
-async fn lookup_addresses(name: &str, port: u16) -> Result<Vec<SocketAddr>, ResolveError> {
+async fn lookup_addresses(
+    name: &str,
+    port: u16,
+    dns_permits: &Semaphore,
+) -> Result<Vec<SocketAddr>, ResolveError> {
+    let _permit = dns_permits.try_acquire().map_err(|_| ResolveError::Busy)?;
     let lookup = timeout(DNS_TIMEOUT, lookup_host((name, port)))
         .await
         .map_err(|_| ResolveError::Dns)?
@@ -85,4 +94,20 @@ async fn lookup_addresses(name: &str, port: u16) -> Result<Vec<SocketAddr>, Reso
         return Err(ResolveError::Dns);
     }
     Ok(addresses.into_iter().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::Semaphore;
+
+    use super::{lookup_addresses, ResolveError};
+
+    #[tokio::test]
+    async fn hostname_lookup_rejects_immediately_when_capacity_is_exhausted() {
+        let permits = Semaphore::new(0);
+        assert!(matches!(
+            lookup_addresses("localhost", 443, &permits).await,
+            Err(ResolveError::Busy)
+        ));
+    }
 }

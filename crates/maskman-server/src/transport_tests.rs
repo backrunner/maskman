@@ -8,7 +8,9 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
 use crate::datagram;
 
-use super::{TransportContext, TransportLimits, TransportMode, TransportServer};
+use super::{
+    drain_request_tasks, TransportContext, TransportLimits, TransportMode, TransportServer,
+};
 
 #[path = "ip_transport_tests.rs"]
 mod ip_tests;
@@ -18,6 +20,32 @@ mod udp_tests;
 type ClientDriver = h3::client::Connection<h3_quinn::Connection, Bytes>;
 type RequestSender = h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
 type RequestStream = h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
+
+#[tokio::test]
+async fn request_drain_aborts_and_joins_tasks_after_the_deadline() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DropSignal(Arc<AtomicBool>);
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let dropped = Arc::new(AtomicBool::new(false));
+    let signal = dropped.clone();
+    let mut requests = tokio::task::JoinSet::new();
+    requests.spawn(async move {
+        let _signal = DropSignal(signal);
+        std::future::pending::<()>().await;
+        Ok(())
+    });
+
+    drain_request_tasks(&mut requests, Duration::from_millis(10), None).await;
+
+    assert!(requests.is_empty());
+    assert!(dropped.load(Ordering::Acquire));
+}
 
 struct TestClient {
     endpoint: Endpoint,

@@ -72,6 +72,8 @@ pub enum ControlError {
     TooLarge,
     #[error("control protocol version {received} is unsupported; expected {expected}")]
     Version { received: u32, expected: u32 },
+    #[error("control response request_id {received} does not match request {expected}")]
+    RequestId { received: u64, expected: u64 },
     #[error("another maskman daemon is listening on {0}")]
     AlreadyRunning(PathBuf),
     #[error("refusing to replace non-socket path {0}")]
@@ -97,14 +99,69 @@ pub async fn request(
     command: ControlCommand,
 ) -> Result<ControlResponse, ControlError> {
     let mut stream = UnixStream::connect(path).await?;
-    let request = ControlRequest {
+    let request = new_request(command);
+    write_frame(&mut stream, &request).await?;
+    stream.shutdown().await?;
+    let response = read_frame(&mut stream).await?;
+    validate_response(response, request.request_id)
+}
+
+#[cfg(unix)]
+pub fn request_blocking(
+    path: &Path,
+    command: ControlCommand,
+    timeout: std::time::Duration,
+) -> Result<ControlResponse, ControlError> {
+    use std::io::{Read, Write};
+
+    let mut stream = std::os::unix::net::UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+    let request = new_request(command);
+    let encoded = serde_json::to_vec(&request)?;
+    if encoded.len() > MAX_CONTROL_MESSAGE_BYTES {
+        return Err(ControlError::TooLarge);
+    }
+    stream.write_all(&(encoded.len() as u32).to_be_bytes())?;
+    stream.write_all(&encoded)?;
+    stream.shutdown(std::net::Shutdown::Write)?;
+
+    let mut header = [0u8; 4];
+    stream.read_exact(&mut header)?;
+    let length = u32::from_be_bytes(header) as usize;
+    if length > MAX_CONTROL_MESSAGE_BYTES {
+        return Err(ControlError::TooLarge);
+    }
+    let mut data = vec![0u8; length];
+    stream.read_exact(&mut data)?;
+    validate_response(serde_json::from_slice(&data)?, request.request_id)
+}
+
+fn new_request(command: ControlCommand) -> ControlRequest {
+    ControlRequest {
         version: CONTROL_PROTOCOL_VERSION,
         request_id: NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed),
         command,
-    };
-    write_frame(&mut stream, &request).await?;
-    stream.shutdown().await?;
-    read_frame(&mut stream).await
+    }
+}
+
+fn validate_response(
+    response: ControlResponse,
+    expected_request_id: u64,
+) -> Result<ControlResponse, ControlError> {
+    if response.version != CONTROL_PROTOCOL_VERSION {
+        return Err(ControlError::Version {
+            received: response.version,
+            expected: CONTROL_PROTOCOL_VERSION,
+        });
+    }
+    if response.request_id != expected_request_id {
+        return Err(ControlError::RequestId {
+            received: response.request_id,
+            expected: expected_request_id,
+        });
+    }
+    Ok(response)
 }
 
 pub(crate) async fn start(
@@ -262,12 +319,19 @@ fn failure(request_id: u64, error: String) -> ControlResponse {
 
 async fn prepare_socket(path: &Path) -> Result<(), ControlError> {
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        let created = match tokio::fs::symlink_metadata(parent).await {
+            Ok(_) => false,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tokio::fs::create_dir_all(parent).await?;
+                true
+            }
+            Err(error) => return Err(error.into()),
+        };
         let metadata = tokio::fs::symlink_metadata(parent).await?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(ControlError::UnsafeSocketPath(parent.to_path_buf()));
         }
-        set_directory_permissions(parent)?;
+        validate_directory_permissions(parent, &metadata, created)?;
     }
     let metadata = match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) => metadata,
@@ -307,17 +371,26 @@ fn socket_permissions_are_private(metadata: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(unix)]
-fn set_directory_permissions(path: &Path) -> Result<(), ControlError> {
+fn validate_directory_permissions(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    created: bool,
+) -> Result<(), ControlError> {
     use std::os::unix::fs::PermissionsExt;
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.permissions().mode() & 0o077 != 0 {
+    if created {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    } else if metadata.permissions().mode() & 0o002 != 0 {
+        return Err(ControlError::UnsafeSocketPath(path.to_path_buf()));
     }
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn set_directory_permissions(_path: &Path) -> Result<(), ControlError> {
+fn validate_directory_permissions(
+    _path: &Path,
+    _metadata: &std::fs::Metadata,
+    _created: bool,
+) -> Result<(), ControlError> {
     Ok(())
 }
 

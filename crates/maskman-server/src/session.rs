@@ -79,8 +79,16 @@ impl Drop for QuotaPermit {
 
 impl SessionRegistry {
     pub fn insert(&self, stream_id: u64, session: UdpSessionHandle) -> bool {
+        use std::collections::hash_map::Entry;
+
         let mut sessions = self.sessions.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        sessions.insert(stream_id, session).is_none()
+        match sessions.entry(stream_id) {
+            Entry::Vacant(entry) => {
+                entry.insert(session);
+                true
+            }
+            Entry::Occupied(_) => false,
+        }
     }
 
     pub fn remove(&self, stream_id: u64) -> Option<UdpSessionHandle> {

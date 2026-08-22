@@ -3,6 +3,7 @@ mod completions;
 mod config;
 mod lifecycle;
 mod setup;
+mod update_service;
 
 use anyhow::Result;
 

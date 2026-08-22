@@ -5,7 +5,7 @@ use std::sync::{
 
 use bytes::Bytes;
 use maskman_config::CompiledConfig;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 
 use crate::{
     proxy::{address_pool::AddressPoolSet, ip::IpSessionRegistry},
@@ -20,12 +20,15 @@ pub struct TransportContext {
     pub(crate) ip_registry: Arc<IpSessionRegistry>,
     pub(crate) address_pools: Arc<AddressPoolSet>,
     pub(crate) tun_tx: mpsc::Sender<Bytes>,
+    pub(crate) dns_permits: Arc<Semaphore>,
     tun_rx: Mutex<Option<mpsc::Receiver<Bytes>>>,
     next_connection_id: AtomicU64,
     pub(crate) stats: Arc<RuntimeStats>,
 }
 
 impl TransportContext {
+    const MAX_PENDING_DNS: usize = 256;
+
     pub fn new(config: Arc<CompiledConfig>) -> Self {
         let (tun_tx, tun_rx) = mpsc::channel(64);
         Self {
@@ -34,6 +37,7 @@ impl TransportContext {
             config_generation: AtomicU64::new(1),
             quotas: Arc::new(QuotaState::default()),
             ip_registry: Arc::new(IpSessionRegistry::default()),
+            dns_permits: Arc::new(Semaphore::new(Self::MAX_PENDING_DNS)),
             tun_tx,
             tun_rx: Mutex::new(Some(tun_rx)),
             next_connection_id: AtomicU64::new(1),

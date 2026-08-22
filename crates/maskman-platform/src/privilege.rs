@@ -201,7 +201,19 @@ fn ensure_state_directory(path: &Path, uid: u32, gid: u32) -> Result<(), Platfor
     .map_err(|error| PlatformError::Network(format!("grant state directory ownership: {error}")))?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o770))
         .map_err(PlatformError::ServiceIo)?;
-    audit_directory_ancestors(path, "worker state directory", uid, gid)
+    audit_directory_ancestors(path, "worker state directory", uid, gid)?;
+
+    let log_dir = path.join("logs");
+    ensure_directory_chain(&log_dir, uid, gid)?;
+    nix::unistd::chown(
+        &log_dir,
+        Some(nix::unistd::Uid::from_raw(0)),
+        Some(nix::unistd::Gid::from_raw(gid)),
+    )
+    .map_err(|error| PlatformError::Network(format!("grant log directory ownership: {error}")))?;
+    fs::set_permissions(&log_dir, fs::Permissions::from_mode(0o770))
+        .map_err(PlatformError::ServiceIo)?;
+    audit_directory_ancestors(&log_dir, "worker log directory", uid, gid)
 }
 
 #[cfg(unix)]

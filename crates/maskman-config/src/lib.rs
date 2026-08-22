@@ -187,11 +187,24 @@ mod tests {
     #[test]
     fn metrics_listener_cannot_collide_with_quic_listener() {
         let mut document = ConfigDocument::default();
+        document.server.listen[0] = "127.0.0.1:4433".into();
         document.observability.metrics_listen = document.server.listen[0].clone();
         assert!(matches!(
             validate(&document),
             Err(crate::ValidationError::MetricsListenConflict(_))
         ));
+    }
+
+    #[test]
+    fn metrics_listener_must_remain_on_loopback() {
+        for address in ["0.0.0.0:9090", "[::]:9090", "192.0.2.1:9090"] {
+            let mut document = ConfigDocument::default();
+            document.observability.metrics_listen = address.into();
+            assert!(matches!(
+                validate(&document),
+                Err(crate::ValidationError::MetricsListenNonLoopback(_))
+            ));
+        }
     }
 
     #[test]

@@ -98,6 +98,8 @@ pub enum ValidationError {
     NatInterfaceInvalid(String),
     #[error("observability.metrics_listen is invalid: {0}")]
     MetricsListen(String),
+    #[error("observability.metrics_listen must use a loopback address: {0}")]
+    MetricsListenNonLoopback(String),
     #[error("observability.metrics_listen must not overlap server.listen: {0}")]
     MetricsListenConflict(String),
 }
@@ -155,6 +157,9 @@ pub fn validate(document: &ConfigDocument) -> Result<(), ValidationError> {
     })?;
     if metrics.port() == 0 {
         return Err(ValidationError::MetricsListen(document.observability.metrics_listen.clone()));
+    }
+    if !metrics.ip().is_loopback() {
+        return Err(ValidationError::MetricsListenNonLoopback(metrics.to_string()));
     }
     if document.server.listen.iter().filter_map(|listen| listen.parse::<SocketAddr>().ok()).any(
         |listen| {

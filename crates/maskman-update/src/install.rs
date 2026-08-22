@@ -200,6 +200,11 @@ fn rollback(
     service: &dyn ServiceController,
     error: UpdateError,
 ) -> Result<InstallOutcome, UpdateError> {
+    service.stop().map_err(|stop_error| {
+        UpdateError::Rollback(format!(
+            "{error}; stopping failed service before restore failed: {stop_error}"
+        ))
+    })?;
     restore_binary(binary_path, backup, had_binary).map_err(|rollback_error| {
         UpdateError::Rollback(format!("{error}; restoring old binary failed: {rollback_error}"))
     })?;
@@ -386,89 +391,5 @@ fn set_executable(_path: &Path) -> Result<(), UpdateError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{install_verified, validate_archive_path};
-    use crate::VerifiedArtifact;
-    use flate2::{write::GzEncoder, Compression};
-    use semver::Version;
-    use std::{fs, path::Path};
-    use tar::Builder;
-
-    #[test]
-    fn archive_path_rejects_traversal_and_absolute_names() {
-        assert!(validate_archive_path(Path::new("../maskman")).is_err());
-        assert!(validate_archive_path(Path::new("/tmp/maskman")).is_err());
-        assert!(validate_archive_path(Path::new("bin/maskman")).is_ok());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn install_rejects_a_broken_symlink_binary_path() {
-        use std::os::unix::fs::symlink;
-
-        let root = std::env::temp_dir().join(format!(
-            "maskman-update-symlink-{}-{}",
-            std::process::id(),
-            std::thread::current().name().unwrap_or("test")
-        ));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(&root).unwrap_or_else(|error| panic!("create test root: {error}"));
-        let binary = root.join("maskman");
-        symlink(root.join("missing-maskman"), &binary)
-            .unwrap_or_else(|error| panic!("create broken binary symlink: {error}"));
-        let artifact = VerifiedArtifact {
-            version: Version::parse("9.9.9").unwrap_or_else(|error| panic!("version: {error}")),
-            archive: Vec::new(),
-        };
-        assert!(install_verified(&artifact, &binary, None, None).is_err());
-        fs::remove_dir_all(root).unwrap_or_else(|error| panic!("remove test root: {error}"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn install_runs_staged_version_check_and_keeps_one_backup() {
-        let root = std::env::temp_dir().join(format!("maskman-update-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        if let Err(error) = fs::create_dir_all(&root) {
-            panic!("create test directory: {error}");
-        }
-        let binary = root.join("maskman");
-        if let Err(error) = fs::write(&binary, b"old binary") {
-            panic!("write old binary: {error}");
-        }
-        let script = b"#!/bin/sh\nprintf 'maskman 9.9.9\\n'\n";
-        let mut compressed = GzEncoder::new(Vec::new(), Compression::fast());
-        {
-            let mut builder = Builder::new(&mut compressed);
-            let mut header = tar::Header::new_gnu();
-            header.set_size(script.len() as u64);
-            header.set_mode(0o755);
-            header.set_cksum();
-            if let Err(error) = builder.append_data(&mut header, "maskman", script.as_slice()) {
-                panic!("append archive entry: {error}");
-            }
-            if let Err(error) = builder.finish() {
-                panic!("finish archive: {error}");
-            }
-        }
-        let archive = match compressed.finish() {
-            Ok(value) => value,
-            Err(error) => panic!("compress archive: {error}"),
-        };
-        let artifact = VerifiedArtifact {
-            version: Version::parse("9.9.9").unwrap_or_else(|error| panic!("version: {error}")),
-            archive,
-        };
-        let outcome = match install_verified(&artifact, &binary, None, None) {
-            Ok(value) => value,
-            Err(error) => panic!("install archive: {error}"),
-        };
-        assert_eq!(
-            outcome.version,
-            Version::parse("9.9.9").unwrap_or_else(|error| panic!("version: {error}"))
-        );
-        assert_eq!(fs::read(&binary).unwrap_or_default(), script);
-        assert_eq!(fs::read(root.join("maskman.previous")).unwrap_or_default(), b"old binary");
-        let _ = fs::remove_dir_all(root);
-    }
-}
+#[path = "install_tests.rs"]
+mod tests;

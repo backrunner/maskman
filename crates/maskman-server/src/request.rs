@@ -10,7 +10,7 @@ use maskman_protocol::{
     connect::parse_udp_path,
 };
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 
 use crate::{
     auth::{AuthError, Authenticator},
@@ -40,10 +40,30 @@ pub struct RequestContext {
     pub ip_registry: Arc<IpSessionRegistry>,
     pub address_pools: Arc<AddressPoolSet>,
     pub tun_sender: mpsc::Sender<Bytes>,
+    pub dns_permits: Arc<Semaphore>,
     pub connection: quinn::Connection,
     pub connection_id: u64,
     pub peer_certificate_sha256: Option<[u8; 32]>,
     pub(crate) stats: Arc<RuntimeStats>,
+}
+
+struct UdpRegistration {
+    registry: Arc<SessionRegistry>,
+    stream_id: u64,
+}
+
+impl Drop for UdpRegistration {
+    fn drop(&mut self) {
+        self.registry.remove(self.stream_id);
+    }
+}
+
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 #[derive(Debug, Error)]
@@ -70,6 +90,8 @@ pub enum RequestError {
     DatagramTooSmall,
     #[error("QUIC datagram cannot carry the IP packet")]
     DatagramTooLarge,
+    #[error("session registry already contains this HTTP/3 stream")]
+    SessionRegistryConflict,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +103,6 @@ pub(crate) enum ProxyError {
     HttpRequestDenied,
     HttpRequestError,
     ProxyConfigurationError,
-    ProxyInternalError,
 }
 
 impl ProxyError {
@@ -94,7 +115,6 @@ impl ProxyError {
             Self::HttpRequestDenied => "maskman; error=http_request_denied",
             Self::HttpRequestError => "maskman; error=http_request_error",
             Self::ProxyConfigurationError => "maskman; error=proxy_configuration_error",
-            Self::ProxyInternalError => "maskman; error=proxy_internal_error",
         }
     }
 }
@@ -193,6 +213,7 @@ async fn handle_udp(
         &target,
         &policy,
         context.config.udp.prefer_ipv6,
+        &context.dns_permits,
     )
     .await
     {
@@ -228,9 +249,18 @@ async fn handle_udp(
         }
     };
     let udp::UdpSession { handle, mut egress, mut violations, task } = session;
+    let task = AbortOnDrop(task);
     let _activity = context.stats.begin(ActivityKind::UdpSession);
-    context.registry.insert(stream_id, handle.clone());
-    stream.send_response(response(StatusCode::OK, true)).await.map_err(RequestError::Response)?;
+    if let Err(error) = stream.send_response(response(StatusCode::OK, true)).await {
+        drop(quota);
+        return Err(RequestError::Response(error));
+    }
+    if !context.registry.insert(stream_id, handle.clone()) {
+        stream.stop_stream(h3::error::Code::H3_INTERNAL_ERROR);
+        drop(quota);
+        return Err(RequestError::SessionRegistryConflict);
+    }
+    let _registration = UdpRegistration { registry: context.registry.clone(), stream_id };
     let result = drive_proxy_stream(
         &mut stream,
         &handle,
@@ -243,8 +273,7 @@ async fn handle_udp(
     if result.is_err() {
         stream.stop_stream(h3::error::Code::H3_MESSAGE_ERROR);
     }
-    context.registry.remove(stream_id);
-    task.abort();
+    drop(task);
     drop(quota);
     result
 }
@@ -370,6 +399,9 @@ pub(crate) async fn reject_resolver(
 ) -> Result<(), RequestError> {
     let (status, proxy_error) = match error {
         resolver::ResolveError::Dns => (StatusCode::BAD_GATEWAY, ProxyError::DnsError),
+        resolver::ResolveError::Busy => {
+            (StatusCode::SERVICE_UNAVAILABLE, ProxyError::ConnectionLimitReached)
+        }
         resolver::ResolveError::Policy => {
             (StatusCode::FORBIDDEN, ProxyError::DestinationIpProhibited)
         }

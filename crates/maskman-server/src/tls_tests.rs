@@ -2,8 +2,11 @@ use std::{
     fs,
     net::SocketAddr,
     path::PathBuf,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
 };
 
 use quinn::{ClientConfig, Endpoint};
@@ -15,6 +18,8 @@ use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 
 use super::load_server_config_with_client_ca;
 use crate::{TransportLimits, TransportMode, TransportServer};
+
+static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
 #[tokio::test]
 async fn required_mtls_rejects_anonymous_and_accepts_trusted_clients() {
@@ -121,9 +126,10 @@ impl TlsFixture {
     }
 
     fn write_pem_files(&self) -> PemFiles {
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let root =
-            std::env::temp_dir().join(format!("maskman-mtls-{}-{nonce}", std::process::id()));
+            std::env::temp_dir().join(format!("maskman-mtls-{}-{sequence}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
         fs::create_dir(&root).unwrap_or_else(|error| {
             panic!("create mTLS test directory {}: {error}", root.display())
         });

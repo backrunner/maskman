@@ -57,6 +57,14 @@ pub struct TransportServer {
     context: Option<Arc<TransportContext>>,
 }
 
+struct ConnectionRuntime {
+    mode: TransportMode,
+    context: Option<Arc<TransportContext>>,
+    connection_id: Option<u64>,
+    peer_certificate_sha256: Option<[u8; 32]>,
+    drain_timeout: Duration,
+}
+
 #[derive(Clone)]
 pub struct TransportShutdown {
     shutdown_tx: watch::Sender<bool>,
@@ -161,8 +169,17 @@ impl TransportServer {
                     let mode = self.mode;
                     let shutdown = self.shutdown_rx.clone();
                     let context = self.context.clone();
+                    let drain_timeout = self.drain_timeout;
                     connections.spawn(async move {
-                        handle_connection(incoming, max_header_bytes, mode, shutdown, context).await
+                        handle_connection(
+                            incoming,
+                            max_header_bytes,
+                            mode,
+                            shutdown,
+                            context,
+                            drain_timeout,
+                        )
+                        .await
                     });
                 }
                 completed = connections.join_next(), if !connections.is_empty() => {
@@ -253,6 +270,7 @@ async fn handle_connection(
     mode: TransportMode,
     shutdown: watch::Receiver<bool>,
     context: Option<Arc<TransportContext>>,
+    drain_timeout: Duration,
 ) -> Result<(), TransportError> {
     let connection = incoming.await?;
     let _activity = context.as_ref().map(|context| context.stats.begin(ActivityKind::Connection));
@@ -269,11 +287,8 @@ async fn handle_connection(
     drive_connection(
         &mut http3,
         &datagram_connection,
-        mode,
         shutdown,
-        context,
-        connection_id,
-        peer_certificate_sha256,
+        ConnectionRuntime { mode, context, connection_id, peer_certificate_sha256, drain_timeout },
     )
     .await
 }
@@ -281,27 +296,29 @@ async fn handle_connection(
 async fn drive_connection(
     http3: &mut h3::server::Connection<h3_quinn::Connection, Bytes>,
     datagram_connection: &quinn::Connection,
-    mode: TransportMode,
     mut shutdown: watch::Receiver<bool>,
-    context: Option<Arc<TransportContext>>,
-    connection_id: Option<u64>,
-    peer_certificate_sha256: Option<[u8; 32]>,
+    runtime: ConnectionRuntime,
 ) -> Result<(), TransportError> {
+    let ConnectionRuntime { mode, context, connection_id, peer_certificate_sha256, drain_timeout } =
+        runtime;
     let registry = Arc::new(SessionRegistry::default());
-    let mut draining = *shutdown.borrow();
-    if draining {
+    let mut requests = JoinSet::new();
+    if *shutdown.borrow() {
         http3.shutdown(0).await?;
+        return Ok(());
     }
-    loop {
+    let result = loop {
         tokio::select! {
-            changed = shutdown.changed(), if !draining => {
+            changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
-                    draining = true;
-                    http3.shutdown(0).await?;
+                    if let Err(error) = http3.shutdown(0).await {
+                        break Err(error.into());
+                    }
+                    break Ok(());
                 }
             },
-            request = http3.accept() => match request? {
-                Some(resolver) => {
+            request = http3.accept() => match request {
+                Ok(Some(resolver)) => {
                     let request_context = context.as_ref().map(|context| request::RequestContext {
                         config: context.config_snapshot(),
                         registry: registry.clone(),
@@ -309,24 +326,22 @@ async fn drive_connection(
                         ip_registry: context.ip_registry.clone(),
                         address_pools: context.address_pools.clone(),
                         tun_sender: context.tun_tx.clone(),
+                        dns_permits: context.dns_permits.clone(),
                         connection: datagram_connection.clone(),
                         connection_id: connection_id.unwrap_or_default(),
                         peer_certificate_sha256,
                         stats: context.stats.clone(),
                     });
-                    let stats = context.as_ref().map(|context| context.stats.clone());
-                    tokio::spawn(async move {
-                        if let Err(error) = request::handle(resolver, request_mode(mode), request_context).await {
-                            if let Some(stats) = stats {
-                                stats.record_error(error.to_string());
-                            }
-                        }
-                    });
+                    requests.spawn(request::handle(resolver, request_mode(mode), request_context));
                 }
-                None => return Ok(()),
+                Ok(None) => break Ok(()),
+                Err(error) => break Err(error.into()),
             },
-            raw = datagram_connection.read_datagram(), if !draining => {
-                let raw = raw.map_err(|error| TransportError::Datagram(error.to_string()))?;
+            raw = datagram_connection.read_datagram() => {
+                let raw = match raw {
+                    Ok(raw) => raw,
+                    Err(error) => break Err(TransportError::Datagram(error.to_string())),
+                };
                 let Ok(datagram) = datagram::decode(raw) else {
                     continue;
                 };
@@ -339,14 +354,49 @@ async fn drive_connection(
                         datagram.payload,
                     );
                 } else if mode == TransportMode::EchoDatagrams {
-                    let encoded = datagram::encode(datagram.stream_id, datagram.payload)
-                        .map_err(|error| TransportError::Datagram(error.to_string()))?;
-                    datagram_connection
-                        .send_datagram(encoded)
-                        .map_err(|error| TransportError::Datagram(error.to_string()))?;
+                    let encoded = match datagram::encode(datagram.stream_id, datagram.payload) {
+                        Ok(encoded) => encoded,
+                        Err(error) => break Err(TransportError::Datagram(error.to_string())),
+                    };
+                    if let Err(error) = datagram_connection.send_datagram(encoded) {
+                        break Err(TransportError::Datagram(error.to_string()));
+                    }
                 }
             },
+            completed = requests.join_next(), if !requests.is_empty() => {
+                observe_request_result(completed, context.as_deref());
+            }
         }
+    };
+    drain_request_tasks(&mut requests, drain_timeout, context.as_deref()).await;
+    result
+}
+
+fn observe_request_result(
+    result: Option<Result<Result<(), request::RequestError>, tokio::task::JoinError>>,
+    context: Option<&TransportContext>,
+) {
+    let Some(context) = context else { return };
+    match result {
+        Some(Ok(Err(error))) => context.record_runtime_error(error.to_string()),
+        Some(Err(error)) => context.record_runtime_error(error.to_string()),
+        _ => {}
+    }
+}
+
+async fn drain_request_tasks(
+    requests: &mut JoinSet<Result<(), request::RequestError>>,
+    drain_timeout: Duration,
+    context: Option<&TransportContext>,
+) {
+    let drain = async {
+        while let Some(result) = requests.join_next().await {
+            observe_request_result(Some(result), context);
+        }
+    };
+    if tokio::time::timeout(drain_timeout, drain).await.is_err() {
+        requests.abort_all();
+        while requests.join_next().await.is_some() {}
     }
 }
 
