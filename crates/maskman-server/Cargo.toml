@@ -7,6 +7,7 @@ authors.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+base64 = "0.22"
 bytes = "1.10"
 h3 = { version = "0.0.8", git = "https://github.com/hyperium/h3", rev = "1f3d5295833ad454343f25d55633fb6bee1027b2" }
 h3-quinn = { version = "0.0.10", git = "https://github.com/hyperium/h3", rev = "1f3d5295833ad454343f25d55633fb6bee1027b2" }

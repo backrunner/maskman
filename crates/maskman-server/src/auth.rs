@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use http::HeaderMap;
 use maskman_config::{AuthMode, CompiledConfig};
 use sha2::{Digest, Sha256};
@@ -46,11 +47,13 @@ impl Authenticator {
             });
         }
         let bearer = self.bearer(headers);
+        let credentials =
+            bearer.or_else(|bearer_error| self.basic(headers).map_err(|_| bearer_error));
         let certificate = peer_certificate_sha256.and_then(|digest| self.certificate(digest));
         match self.config.auth_mode {
-            AuthMode::Bearer => bearer,
+            AuthMode::Bearer => credentials,
             AuthMode::Mtls => certificate.ok_or(AuthError::Missing),
-            AuthMode::BearerOrMtls => match bearer {
+            AuthMode::BearerOrMtls => match credentials {
                 Ok(principal) => Ok(principal),
                 Err(error) => certificate.ok_or(error),
             },
@@ -96,6 +99,36 @@ impl Authenticator {
         self.principal(&token.principal)
     }
 
+    fn basic(&self, headers: &HeaderMap) -> Result<Principal, AuthError> {
+        let value = headers
+            .get(http::header::AUTHORIZATION)
+            .ok_or(AuthError::Missing)?
+            .to_str()
+            .map_err(|_| AuthError::Invalid)?;
+        let encoded = value.strip_prefix("Basic ").ok_or(AuthError::Invalid)?;
+        let decoded = BASE64.decode(encoded).map_err(|_| AuthError::Invalid)?;
+        let credentials = std::str::from_utf8(&decoded).map_err(|_| AuthError::Invalid)?;
+        let (token_id, secret) = credentials.split_once(':').ok_or(AuthError::Invalid)?;
+        if token_id.is_empty() || secret.is_empty() || secret.len() > 512 {
+            return Err(AuthError::Invalid);
+        }
+        let token = self
+            .config
+            .token_principals
+            .iter()
+            .find(|(configured_id, _)| configured_id.as_str() == token_id)
+            .map(|(_, token)| token)
+            .ok_or(AuthError::Invalid)?;
+        let digest = Sha256::digest(secret.as_bytes());
+        if digest.as_slice().ct_eq(&token.secret_sha256).unwrap_u8() != 1 {
+            return Err(AuthError::Invalid);
+        }
+        if token.expires_at.is_some_and(|expiry| expiry <= time::OffsetDateTime::now_utc()) {
+            return Err(AuthError::Expired);
+        }
+        self.principal(&token.principal)
+    }
+
     fn certificate(&self, digest: [u8; 32]) -> Option<Principal> {
         let key = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
         let principal = self.config.certificate_principals.get(&key)?;
@@ -112,6 +145,7 @@ impl Authenticator {
 mod tests {
     use std::sync::Arc;
 
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     use http::HeaderMap;
     use maskman_config::model::ConfigDocument;
     use sha2::{Digest, Sha256};
@@ -173,6 +207,21 @@ mod tests {
             "Bearer mm_token_wrong".parse().unwrap_or_else(|error| panic!("header: {error}")),
         );
         assert_eq!(authenticator.authenticate(&headers, None), Err(AuthError::Invalid));
+    }
+
+    #[test]
+    fn basic_username_and_password_are_verified_for_masque_clients() {
+        let authenticator = auth(None);
+        let encoded = BASE64.encode("token:secret");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Basic {encoded}").parse().unwrap_or_else(|error| panic!("header: {error}")),
+        );
+        let principal = authenticator
+            .authenticate(&headers, None)
+            .unwrap_or_else(|error| panic!("authenticate: {error}"));
+        assert_eq!(principal.id, "client");
     }
 
     #[test]

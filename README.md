@@ -76,6 +76,31 @@ cargo run --locked -p maskman -- \
 The setup command prints the bearer credential once. Development TLS is
 intended for local testing only.
 
+### Surge MASQUE client
+
+Surge iOS 5.22+ and macOS 6.9+ support the standard MASQUE policy. Maskman
+accepts Surge's HTTP Basic credentials by mapping the token ID to `username`
+and the token secret to `password`. Given a setup credential in the form
+`mm_<id>_<secret>`, use:
+
+```ini
+[Proxy]
+Maskman = masque, proxy.example.com, 443, username=<id>, password=<secret>, sni=proxy.example.com
+
+[Proxy Group]
+Default = select, Maskman
+```
+
+Use a certificate trusted by the device. For development-only testing with a
+self-signed certificate, add `skip-cert-verify=true` to the policy and do not
+expose that configuration to the Internet. Surge's UDP relay uses CONNECT-UDP
+and HTTP Datagrams automatically; the server must have `proxy.udp.enabled =
+true` and the token's role must include `connect-udp`.
+
+The endpoint path is Maskman's standard `/.well-known/masque` base path. A
+Surge device test is still required for an interoperability record; the
+server-side Basic credential mapping is covered by `maskman-server` tests.
+
 ### Service lifecycle
 
 The installer delegates service ownership and hardening to the platform-aware

@@ -375,9 +375,10 @@ pub(crate) async fn reject_auth(
     _error: AuthError,
 ) -> Result<(), RequestError> {
     let mut response = error_response(StatusCode::UNAUTHORIZED, ProxyError::HttpRequestDenied);
-    response
-        .headers_mut()
-        .insert("www-authenticate", HeaderValue::from_static("Bearer realm=\"maskman\""));
+    response.headers_mut().insert(
+        "www-authenticate",
+        HeaderValue::from_static("Bearer realm=\"maskman\", Basic realm=\"maskman\""),
+    );
     stream.send_response(response).await.map_err(RequestError::Response)?;
     stream.finish().await.map_err(RequestError::Response)
 }

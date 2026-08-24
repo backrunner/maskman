@@ -1,5 +1,6 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use bytes::{Buf, Bytes};
 use http::{Method, Request, StatusCode, Version};
 use quinn::{ClientConfig, Endpoint};
@@ -136,7 +137,7 @@ async fn authenticated_connect_udp_forwards_to_connected_socket() {
         .uri(format!("https://proxy.example{path}"))
         .version(Version::HTTP_3)
         .header("capsule-protocol", "?1")
-        .header("authorization", "Bearer mm_token_secret")
+        .header("authorization", format!("Basic {}", BASE64.encode("token:secret")))
         .body(())
         .unwrap_or_else(|error| panic!("build authenticated request: {error}"));
     request.extensions_mut().insert(h3::ext::Protocol::CONNECT_UDP);
