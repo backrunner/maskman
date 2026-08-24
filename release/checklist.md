@@ -10,10 +10,11 @@ run.
 - [x] `cargo deny check` and `cargo audit` with the documented `paste` allow
 - [x] `cargo machete 0.9.2` reports no unused direct dependencies
 - [x] `cargo xtask compliance` (43 cumulative requirements)
+- [x] Surge Basic-authenticated CONNECT-UDP server forwarding test
 - [x] all eight fuzz targets completed 100,000 runs with bounded RSS and allocation limits
 - [x] codec/packet benchmark smoke recorded in `.agents/12-m8-evidence.md`
 - [ ] release benchmark compared with the previous release on a fixed host
-- [ ] Linux namespace dual-stack smoke recorded
+- [ ] Linux namespace dual-stack smoke recorded (deferred for the Surge server-only scope; required before CONNECT-IP/TUN release)
 - [ ] macOS arm64 utun/route privileged smoke recorded
 - [ ] independent MASQUE interoperability record attached
 - [ ] 24-hour soak report attached

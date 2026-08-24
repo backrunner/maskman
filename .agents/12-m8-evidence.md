@@ -37,6 +37,10 @@ artifact 已删除。随后全部 target 使用修订后的双重限制完成 10
   TOML/JSON config targets，以及小型 checked-in seed corpus。
 - `scripts/namespace-smoke.sh` 创建 Linux client/proxy/target 双栈拓扑，但
   明确不把 routed ping 当作 Maskman TUN/session forwarding 证据。
+- Surge 服务端路径已通过 `maskman-server` 的
+  `surge_basic_auth_connect_udp_forwards_to_connected_socket` 端到端测试：
+  HTTP/3 CONNECT-UDP、Basic token credentials、UDP target forwarding 和
+  response datagram path 均通过；该测试不替代真实 Surge 设备互操作记录。
 - `scripts/macos-arm64-smoke.sh`、`scripts/soak.sh` 和
   `tests/interop/README.md` 固定目标 runner、长稳和互操作记录入口。
 - `.github/workflows/ci.yml`、`.github/workflows/release.yml` 和
@@ -53,6 +57,9 @@ artifact 已删除。随后全部 target 使用修订后的双重限制完成 10
 - 生产 Ed25519 key、clean-host archive/signature/SBOM/provenance 验证；
 - setup -> install -> start -> status -> stop 完整记录；
 - clean-host update、checksum、signature、health-check 和 rollback 演练。
+
+Linux namespace smoke 当前按 Surge server-only 范围 deferred；在重新声明
+CONNECT-IP/TUN 或完整 release profile 前必须恢复并取得特权 runner 证据。
 
 任一 blocker 未完成时，GitHub release 必须保持 draft，README 不得标记 v1.0
 完成。

@@ -76,7 +76,7 @@ async fn connect_udp_supports_both_datagram_paths_and_migration() {
 }
 
 #[tokio::test]
-async fn authenticated_connect_udp_forwards_to_connected_socket() {
+async fn surge_basic_auth_connect_udp_forwards_to_connected_socket() {
     let target = tokio::net::UdpSocket::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap_or_else(|error| panic!("bind UDP target: {error}"));

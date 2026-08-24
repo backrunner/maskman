@@ -1,3 +1,5 @@
+# Deferred for the Surge server-only acceptance scope. Keep this manual
+# workflow for the future privileged CONNECT-IP/TUN release gate.
 name: maskman-privileged-smoke
 
 on:

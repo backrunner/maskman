@@ -97,9 +97,11 @@ expose that configuration to the Internet. Surge's UDP relay uses CONNECT-UDP
 and HTTP Datagrams automatically; the server must have `proxy.udp.enabled =
 true` and the token's role must include `connect-udp`.
 
-The endpoint path is Maskman's standard `/.well-known/masque` base path. A
-Surge device test is still required for an interoperability record; the
-server-side Basic credential mapping is covered by `maskman-server` tests.
+The endpoint path is Maskman's standard `/.well-known/masque` base path. The
+server-side acceptance path is covered by the
+`surge_basic_auth_connect_udp_forwards_to_connected_socket` end-to-end test in
+`maskman-server`. A physical Surge device test remains a separate
+interoperability record and is not required to validate the server proxy path.
 
 ### Service lifecycle
 

@@ -46,9 +46,15 @@ impl Authenticator {
                 roles: self.config.roles.keys().cloned().collect(),
             });
         }
-        let bearer = self.bearer(headers);
-        let credentials =
-            bearer.or_else(|bearer_error| self.basic(headers).map_err(|_| bearer_error));
+        let credentials = match headers.get(http::header::AUTHORIZATION) {
+            None => Err(AuthError::Missing),
+            Some(value) => match value.to_str() {
+                Err(_) => Err(AuthError::Invalid),
+                Ok(value) if value.starts_with("Bearer ") => self.bearer(headers),
+                Ok(value) if value.starts_with("Basic ") => self.basic(headers),
+                Ok(_) => Err(AuthError::Invalid),
+            },
+        };
         let certificate = peer_certificate_sha256.and_then(|digest| self.certificate(digest));
         match self.config.auth_mode {
             AuthMode::Bearer => credentials,
@@ -231,6 +237,18 @@ mod tests {
         headers.insert(
             "authorization",
             "Bearer mm_token_secret".parse().unwrap_or_else(|error| panic!("header: {error}")),
+        );
+        assert_eq!(authenticator.authenticate(&headers, None), Err(AuthError::Expired));
+    }
+
+    #[test]
+    fn expired_basic_is_rejected() {
+        let authenticator = auth(Some("2000-01-01T00:00:00Z"));
+        let encoded = BASE64.encode("token:secret");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("Basic {encoded}").parse().unwrap_or_else(|error| panic!("header: {error}")),
         );
         assert_eq!(authenticator.authenticate(&headers, None), Err(AuthError::Expired));
     }
