@@ -383,7 +383,7 @@ level = "MUST"
 summary = "Authentication and capability authorization complete before DNS resolution or socket provisioning"
 status = "implemented"
 source = ["crates/maskman-server/src/request.rs", "crates/maskman-server/src/proxy/resolver.rs"]
-tests = ["crates/maskman-server/src/transport_tests.rs::authenticated_connect_udp_forwards_to_connected_socket"]
+tests = ["crates/maskman-server/src/transport_tests.rs::surge_basic_auth_connect_udp_forwards_to_connected_socket"]
 
 [[requirement]]
 id = "MASKMAN-M3-UDP-DNS-POLICY"
@@ -403,7 +403,7 @@ level = "MUST"
 summary = "Each UDP tunnel uses a connected UDP socket and keeps it tied to the request stream"
 status = "implemented"
 source = ["crates/maskman-server/src/proxy/udp.rs", "crates/maskman-server/src/request.rs"]
-tests = ["crates/maskman-server/src/transport_tests.rs::authenticated_connect_udp_forwards_to_connected_socket"]
+tests = ["crates/maskman-server/src/transport_tests.rs::surge_basic_auth_connect_udp_forwards_to_connected_socket"]
 
 [[requirement]]
 id = "MASKMAN-M3-UDP-LIMIT"
