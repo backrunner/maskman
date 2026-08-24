@@ -17,6 +17,18 @@ system launchd daemon. It creates the dedicated `maskman` service identity,
 generates a first bearer-authenticated development configuration, installs the
 native service, starts it, and prints the credential in a terminal panel.
 
+The installer verifies both the SHA-256 digest and detached Ed25519 signature
+before installing a release. Set the release public key supplied by the
+release operator before running it:
+
+```sh
+export MASKMAN_RELEASE_PUBLIC_KEY_HEX='<64-hex-character-release-public-key>'
+```
+
+It fails closed when this trust anchor is missing. A production release must
+also publish the matching `.sig` asset; there are no release artifacts until
+the release checklist is complete.
+
 Download the script first so it can be inspected before running it:
 
 ```sh
@@ -24,13 +36,15 @@ curl --fail --location --proto '=https' --tlsv1.2 \
   https://raw.githubusercontent.com/backrunner/maskman/main/scripts/install.sh \
   --output maskman-install.sh
 chmod 0755 maskman-install.sh
-sudo ./maskman-install.sh --color auto
+sudo --preserve-env=MASKMAN_RELEASE_PUBLIC_KEY_HEX \
+  ./maskman-install.sh --color auto
 ```
 
 For a reproducible install, pin an exact published release:
 
 ```sh
-sudo ./maskman-install.sh --version 0.1.0 --color auto
+sudo --preserve-env=MASKMAN_RELEASE_PUBLIC_KEY_HEX \
+  ./maskman-install.sh --version 0.1.0 --color auto
 ```
 
 The panel prints a token in the form `mm_<id>_<secret>`. Store it immediately;

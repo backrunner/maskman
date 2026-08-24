@@ -10,6 +10,9 @@ readonly INSTALL_ROOT="/usr/local/bin"
 readonly BINARY_PATH="${INSTALL_ROOT}/maskman"
 readonly DEFAULT_CONFIG_LINUX="/etc/maskman/config.toml"
 readonly DEFAULT_CONFIG_MACOS="/Library/Application Support/Maskman/config.toml"
+readonly MAX_ARCHIVE_BYTES=$((128 * 1024 * 1024))
+readonly MAX_BINARY_BYTES=$((64 * 1024 * 1024))
+readonly RELEASE_PUBLIC_KEY_HEX="${MASKMAN_RELEASE_PUBLIC_KEY_HEX:-}"
 
 color_mode="auto"
 requested_version="${MASKMAN_VERSION:-latest}"
@@ -36,6 +39,8 @@ Options:
 
 Environment:
   MASKMAN_VERSION    Same as --version
+  MASKMAN_RELEASE_PUBLIC_KEY_HEX
+                     Trusted Ed25519 release public key (64 hexadecimal chars)
   NO_COLOR            Disable ANSI output when --color auto is used
 EOF
 }
@@ -172,11 +177,21 @@ detect_platform() {
 require_tools() {
     command -v curl >/dev/null 2>&1 || fail "curl is required"
     command -v tar >/dev/null 2>&1 || fail "tar is required"
+    command -v openssl >/dev/null 2>&1 || fail "openssl is required for release signature verification"
+    command -v xxd >/dev/null 2>&1 || fail "xxd is required for release signature verification"
     if [[ "$os" == "Linux" ]]; then
         command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
     else
         command -v shasum >/dev/null 2>&1 || fail "shasum is required"
     fi
+}
+
+validate_release_key() {
+    [[ "$RELEASE_PUBLIC_KEY_HEX" =~ ^[0-9a-fA-F]{64}$ ]] \
+        || fail "MASKMAN_RELEASE_PUBLIC_KEY_HEX must contain exactly 64 hexadecimal characters"
+    [[ "${RELEASE_PUBLIC_KEY_HEX,,}" != \
+        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a" ]] \
+        || fail "refusing the public RFC 8032 test key as a release trust anchor"
 }
 
 require_root() {
@@ -190,7 +205,7 @@ validate_version() {
 resolve_version() {
     if [[ "$requested_version" == "latest" ]]; then
         local metadata tag
-        metadata="$(curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+        metadata="$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --silent --show-error \
             -H 'Accept: application/vnd.github+json' -A 'maskman-install/1' "$API_URL")" \
             || fail "could not read the latest GitHub release"
         tag="$(printf '%s' "$metadata" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
@@ -206,15 +221,25 @@ download_release() {
     local archive_name="maskman-${requested_version}-${target}.tar.gz"
     local archive_url="https://github.com/${REPOSITORY}/releases/download/v${requested_version}/${archive_name}"
     local checksum_url="${archive_url}.sha256"
+    local signature_url="${archive_url}.sig"
     local archive="$tmp_dir/$archive_name"
     local checksum="$tmp_dir/${archive_name}.sha256"
+    local signature="$tmp_dir/${archive_name}.sig"
 
-    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --silent --show-error \
         -A 'maskman-install/1' "$archive_url" -o "$archive" \
         || fail "could not download ${archive_name}"
-    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --silent --show-error \
         -A 'maskman-install/1' "$checksum_url" -o "$checksum" \
         || fail "could not download the release checksum"
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --silent --show-error \
+        -A 'maskman-install/1' "$signature_url" -o "$signature" \
+        || fail "could not download the release signature"
+
+    local archive_size
+    archive_size="$(wc -c < "$archive")"
+    ((archive_size <= MAX_ARCHIVE_BYTES)) \
+        || fail "release archive exceeds the ${MAX_ARCHIVE_BYTES} byte limit"
 
     local expected actual
     expected="$(awk '{ for (i = 1; i <= NF; i++) if (length($i) == 64 && $i ~ /^[[:xdigit:]]+$/) { print tolower($i); exit } }' "$checksum")"
@@ -225,19 +250,50 @@ download_release() {
         actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
     fi
     [[ "$actual" == "$expected" ]] || fail "release checksum verification failed"
+    verify_release_signature "$archive" "$signature"
 
     archive_path="$archive"
 }
 
+verify_release_signature() {
+    local archive="$1"
+    local signature="$2"
+    local public_key_der="$tmp_dir/release-public-key.der"
+    local public_key_pem="$tmp_dir/release-public-key.pem"
+
+    # Ed25519 SubjectPublicKeyInfo: RFC 8410 algorithm identifier plus raw key.
+    {
+        printf '%s' '302a300506032b6570032100' | xxd -r -p
+        printf '%s' "$RELEASE_PUBLIC_KEY_HEX" | xxd -r -p
+    } >"$public_key_der"
+    openssl pkey -pubin -inform DER -in "$public_key_der" -out "$public_key_pem" \
+        >/dev/null 2>&1 \
+        || fail "release public key encoding is invalid"
+    openssl pkeyutl -verify -rawin -pubin -inkey "$public_key_pem" \
+        -in "$archive" -sigfile "$signature" >/dev/null 2>&1 \
+        || fail "release Ed25519 signature verification failed"
+}
+
 install_binary() {
-    local extract_dir="$tmp_dir/extract"
-    mkdir -p -- "$extract_dir" "$INSTALL_ROOT"
+    local staged_binary="$tmp_dir/maskman"
+    local entries entry_type entry_name binary_size
+    entries="$(tar -tvzf "$archive_path")" \
+        || fail "release archive cannot be listed"
+    [[ "$entries" != *$'\n'* ]] \
+        || fail "release archive must contain exactly one entry"
+    entry_type="${entries:0:1}"
+    entry_name="$(printf '%s\n' "$entries" | awk '{print $NF}')"
+    [[ "$entry_type" == "-" && "$entry_name" == "maskman" ]] \
+        || fail "release archive must contain exactly one regular maskman entry"
+    mkdir -p -- "$INSTALL_ROOT"
     [[ ! -L "$BINARY_PATH" ]] || fail "refusing to replace symbolic-link binary: $BINARY_PATH"
-    tar -xzf "$archive_path" -C "$extract_dir"
-    [[ -f "$extract_dir/maskman" && ! -L "$extract_dir/maskman" ]] \
-        || fail "release archive does not contain a regular maskman binary"
-    chmod 0755 "$extract_dir/maskman"
-    install -m 0755 "$extract_dir/maskman" "$BINARY_PATH"
+    tar -xOzf "$archive_path" maskman >"$staged_binary" \
+        || fail "release archive could not extract maskman"
+    binary_size="$(wc -c < "$staged_binary")"
+    ((binary_size > 0 && binary_size <= MAX_BINARY_BYTES)) \
+        || fail "release binary exceeds the ${MAX_BINARY_BYTES} byte limit"
+    chmod 0755 "$staged_binary"
+    install -m 0755 "$staged_binary" "$BINARY_PATH"
 }
 
 configure_and_start() {
@@ -286,7 +342,7 @@ print_success() {
     local token="$1"
     printf '\n%s%s Maskman is installed and running %s\n' "$bold" "$green" "$reset"
     printf '%s----------------------------------------------%s\n' "$bold" "$reset"
-    printf '%s  Service:  running (%s)\n' "$bold" "$package_family"
+    printf '%s  Service:  running (%s)%s\n' "$bold" "$package_family" "$reset"
     printf '  Config:   %s\n' "$config_path"
     printf '  Endpoint: https://<server-address>:443\n'
     if [[ -n "$token" ]]; then
@@ -313,6 +369,7 @@ main() {
     fi
     require_tools
     require_root
+    validate_release_key
     tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/maskman-install.XXXXXX")"
     chmod 0700 "$tmp_dir"
     resolve_version

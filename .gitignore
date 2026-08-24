@@ -24,3 +24,11 @@ coverage/
 *.p12
 *.pfx
 release-key*
+
+# Local Maskman runtime/configuration and downloaded release signatures.
+/config.toml
+/config.json
+/state/
+.maskman/
+*.log
+*.sig
