@@ -29,7 +29,7 @@ jobs:
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
           workspace_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
-          test "$version" = "$workspace_version"
+          [[ "$version" =~ ^${workspace_version//./\\.}(-[0-9A-Za-z.-]+)?$ ]]
           test "${#MASKMAN_RELEASE_PUBLIC_KEY_HEX}" -eq 64
           case "$MASKMAN_RELEASE_PUBLIC_KEY_HEX" in
             *[!0-9a-fA-F]*) exit 1 ;;

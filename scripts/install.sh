@@ -199,7 +199,8 @@ require_root() {
 }
 
 validate_version() {
-    [[ "$1" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "invalid release version: $1"
+    [[ "$1" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] \
+        || fail "invalid release version: $1"
 }
 
 resolve_version() {
