@@ -217,7 +217,7 @@ fn ipv4_packet(ttl: u8) -> Vec<u8> {
 
 fn checksum(header: &[u8]) -> u16 {
     let mut sum = header
-        .chunks_exact(2)
+        .chunks(2)
         .map(|chunk| u32::from(u16::from_be_bytes([chunk[0], chunk[1]])))
         .sum::<u32>();
     while sum >> 16 != 0 {

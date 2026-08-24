@@ -72,7 +72,7 @@ pub(crate) fn verify_signature(
         let text = String::from_utf8_lossy(encoded).trim().to_owned();
         if text.len() == 128 && text.chars().all(|character| character.is_ascii_hexdigit()) {
             let mut bytes = [0u8; 64];
-            for (index, chunk) in text.as_bytes().chunks_exact(2).enumerate() {
+            for (index, chunk) in text.as_bytes().chunks(2).enumerate() {
                 bytes[index] = (hex_digit(chunk[0]).ok_or(UpdateError::SignatureEncoding)? << 4)
                     | hex_digit(chunk[1]).ok_or(UpdateError::SignatureEncoding)?;
             }
@@ -95,7 +95,7 @@ fn decode_hex(value: &str) -> Option<[u8; 32]> {
         return None;
     }
     let mut bytes = [0u8; 32];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in value.as_bytes().chunks(2).enumerate() {
         bytes[index] = (hex_digit(chunk[0])? << 4) | hex_digit(chunk[1])?;
     }
     Some(bytes)

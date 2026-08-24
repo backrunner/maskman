@@ -230,7 +230,7 @@ fn decode_hash(value: &str, token: &str) -> Result<[u8; 32], ConfigError> {
         )));
     }
     let mut output = [0u8; 32];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in value.as_bytes().chunks(2).enumerate() {
         let high = hex_digit(chunk[0]).ok_or_else(|| {
             ConfigError::Invariant(format!("token {token} contains an invalid SHA-256 value"))
         })?;

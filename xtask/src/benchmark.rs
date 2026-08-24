@@ -298,7 +298,7 @@ fn ipv4_fixture(transport: Transport, payload_bytes: usize) -> Vec<u8> {
 
 fn checksum(header: &[u8]) -> u16 {
     let mut sum = 0u32;
-    for word in header.chunks_exact(2) {
+    for word in header.chunks(2) {
         sum = sum.saturating_add(u32::from(u16::from_be_bytes([word[0], word[1]])));
     }
     while sum > u32::from(u16::MAX) {

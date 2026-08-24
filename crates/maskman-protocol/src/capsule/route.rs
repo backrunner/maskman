@@ -155,6 +155,9 @@ fn validate_ranges(ranges: &[AddressRange]) -> Result<(), RouteError> {
         if version(previous.start) > version(current.start)
             || (version(previous.start) == version(current.start)
                 && previous.protocol > current.protocol)
+            || (same_family(previous.start, current.start)
+                && previous.protocol == current.protocol
+                && previous.start > current.start)
         {
             return Err(RouteError::Unordered);
         }
@@ -235,6 +238,11 @@ mod tests {
         assert!(RouteAdvertisement::new(vec![
             range("2001:db8::", "2001:db8::1", 6),
             range("192.0.2.0", "192.0.2.1", 6),
+        ])
+        .is_err());
+        assert!(RouteAdvertisement::new(vec![
+            range("192.0.2.20", "192.0.2.30", 17),
+            range("192.0.2.0", "192.0.2.10", 17),
         ])
         .is_err());
     }

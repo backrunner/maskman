@@ -284,7 +284,7 @@ fn ipv4_packet(source: [u8; 4], destination: [u8; 4], protocol: u8, payload: &[u
 
 fn checksum(header: &[u8]) -> u16 {
     let mut sum = 0u32;
-    for pair in header.chunks_exact(2) {
+    for pair in header.chunks(2) {
         sum += u32::from(u16::from_be_bytes([pair[0], pair[1]]));
     }
     while sum >> 16 != 0 {

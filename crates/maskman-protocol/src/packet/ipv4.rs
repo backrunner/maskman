@@ -82,7 +82,7 @@ impl<'a> Ipv4Packet<'a> {
 
 pub(crate) fn header_checksum(header: &[u8]) -> u16 {
     let mut sum = 0u32;
-    for chunk in header.chunks_exact(2) {
+    for chunk in header.as_chunks::<2>().0 {
         sum += u32::from(u16::from_be_bytes([chunk[0], chunk[1]]));
     }
     if header.len() & 1 == 1 {

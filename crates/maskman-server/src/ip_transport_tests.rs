@@ -160,7 +160,7 @@ fn ipv4_packet(source: [u8; 4], destination: [u8; 4], ttl: u8, payload: &[u8]) -
     packet[16..20].copy_from_slice(&destination);
     packet[20..].copy_from_slice(payload);
     let mut sum = 0u32;
-    for pair in packet[..20].chunks_exact(2) {
+    for pair in packet[..20].chunks(2) {
         sum += u32::from(u16::from_be_bytes([pair[0], pair[1]]));
     }
     while sum >> 16 != 0 {
