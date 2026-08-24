@@ -12,7 +12,9 @@ readonly DEFAULT_CONFIG_LINUX="/etc/maskman/config.toml"
 readonly DEFAULT_CONFIG_MACOS="/Library/Application Support/Maskman/config.toml"
 readonly MAX_ARCHIVE_BYTES=$((128 * 1024 * 1024))
 readonly MAX_BINARY_BYTES=$((64 * 1024 * 1024))
-readonly RELEASE_PUBLIC_KEY_HEX="${MASKMAN_RELEASE_PUBLIC_KEY_HEX:-}"
+# Public Ed25519 trust anchor for GitHub release archives. Rotate it only in a
+# reviewed commit together with the matching GitHub Actions secret/variable.
+readonly RELEASE_PUBLIC_KEY_HEX="c88148297ffc380d4a86274885318d4cec1303e645ca96d69b2af6baf3099c5a"
 
 color_mode="auto"
 requested_version="${MASKMAN_VERSION:-latest}"
@@ -39,8 +41,6 @@ Options:
 
 Environment:
   MASKMAN_VERSION    Same as --version
-  MASKMAN_RELEASE_PUBLIC_KEY_HEX
-                     Trusted Ed25519 release public key (64 hexadecimal chars)
   NO_COLOR            Disable ANSI output when --color auto is used
 EOF
 }
@@ -188,7 +188,7 @@ require_tools() {
 
 validate_release_key() {
     [[ "$RELEASE_PUBLIC_KEY_HEX" =~ ^[0-9a-fA-F]{64}$ ]] \
-        || fail "MASKMAN_RELEASE_PUBLIC_KEY_HEX must contain exactly 64 hexadecimal characters"
+        || fail "the embedded release public key is invalid"
     [[ "${RELEASE_PUBLIC_KEY_HEX,,}" != \
         "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a" ]] \
         || fail "refusing the public RFC 8032 test key as a release trust anchor"

@@ -79,7 +79,7 @@ jobs:
         if: matrix.target != 'aarch64-apple-darwin'
         uses: mlugg/setup-zig@v1
         with:
-          version: 0.14.1
+          version: 0.13.0
       - name: Install cargo-zigbuild
         if: matrix.target != 'aarch64-apple-darwin'
         uses: taiki-e/install-action@cargo-zigbuild
