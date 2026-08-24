@@ -26,6 +26,7 @@ Keep the change small, auditable, and consistent with the Maskman implementation
 5. Keep protocol code sans-I/O and keep h3/Quinn types behind the server transport adapter. Keep platform mutation inside the platform crate. Do not add a catch-all common, utils, or helpers module.
 6. Add or update focused tests at the risk boundary. For protocol input, include malformed/truncated/unknown cases and a no-panic property or fuzz case where appropriate. For security or update changes, include negative tests and rollback/error paths.
 7. Run the smallest meaningful verification before handing off: formatting, targeted tests, workspace tests when shared contracts change, and the skill validator when the skill itself changes.
+8. Repository work follows `AGENTS.md`: use the public `backrunner/maskman` repository, Apache-2.0 licensing, the root ignore policy, and the required BackRunner identity/commit subject format.
 
 ## Hard stops
 

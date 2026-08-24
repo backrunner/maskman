@@ -3,11 +3,24 @@
 !/.cargo/config.toml
 fuzz/target/
 fuzz/artifacts/
+dist/
+coverage/
+*.profraw
+*.lcov
 *.swp
 *.tmp
 .DS_Store
+
+# Local environment and editor state.
+.env
+.env.*
+.idea/
+.vscode/
 
 # Local credentials and generated development certificates.
 *.pem
 *.key
 *.secret
+*.p12
+*.pfx
+release-key*
