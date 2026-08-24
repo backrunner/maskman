@@ -76,7 +76,7 @@ fn apply_managed_nat_inner(
     #[cfg(target_os = "linux")]
     {
         let interface = resolve_egress_interface(config.egress_interface)?;
-        let rules = render_nft_rules(interface, config.ipv4_pool, config.ipv6_pool);
+        let rules = render_nft_rules(&interface, config.ipv4_pool, config.ipv6_pool);
         let pending = JournalEntry::NatPending { table: LINUX_TABLE.into() };
         prepare_nat(journal, pending.clone(), journal_path)?;
         apply_linux_rules(&rules)?;
@@ -217,7 +217,8 @@ fn resolve_egress_interface(value: &str) -> Result<String, PlatformError> {
 
 #[cfg(target_os = "linux")]
 fn parse_interface_from_ip_output(output: &[u8]) -> Result<String, PlatformError> {
-    let fields = String::from_utf8_lossy(output).split_whitespace().collect::<Vec<_>>();
+    let binding = String::from_utf8_lossy(output);
+    let fields = binding.split_whitespace().collect::<Vec<_>>();
     fields
         .windows(2)
         .find(|pair| pair[0] == "dev")
