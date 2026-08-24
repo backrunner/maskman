@@ -8,7 +8,7 @@ use flate2::{write::GzEncoder, Compression};
 use semver::Version;
 use tar::Builder;
 
-use super::{install_verified, validate_archive_path};
+use super::{install_verified, is_text_busy, validate_archive_path};
 use crate::{ServiceController, UpdateError, VerifiedArtifact};
 
 const SCRIPT: &[u8] = b"#!/bin/sh\nprintf 'maskman 9.9.9\\n'\n";
@@ -18,6 +18,13 @@ fn archive_path_rejects_traversal_and_absolute_names() {
     assert!(validate_archive_path(Path::new("../maskman")).is_err());
     assert!(validate_archive_path(Path::new("/tmp/maskman")).is_err());
     assert!(validate_archive_path(Path::new("bin/maskman")).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn staged_binary_spawn_recognizes_text_busy_as_retryable() {
+    let error = std::io::Error::from_raw_os_error(26);
+    assert!(is_text_busy(&error));
 }
 
 #[cfg(unix)]

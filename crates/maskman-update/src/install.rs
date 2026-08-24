@@ -273,13 +273,7 @@ fn staged_checks(
 }
 
 fn run_staged(binary: &Path, args: &[&str]) -> Result<std::process::Output, UpdateError> {
-    let mut child = Command::new(binary)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| UpdateError::StagedCheck(error.to_string()))?;
+    let mut child = spawn_staged(binary, args)?;
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         if child.try_wait().map_err(|error| UpdateError::StagedCheck(error.to_string()))?.is_some()
@@ -297,6 +291,38 @@ fn run_staged(binary: &Path, args: &[&str]) -> Result<std::process::Output, Upda
         }
         thread::sleep(Duration::from_millis(25));
     }
+}
+
+fn spawn_staged(binary: &Path, args: &[&str]) -> Result<std::process::Child, UpdateError> {
+    const MAX_TEXT_BUSY_RETRIES: usize = 8;
+    let mut retries = 0;
+    loop {
+        let result = Command::new(binary)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        match result {
+            Ok(child) => return Ok(child),
+            Err(error) if is_text_busy(&error) && retries < MAX_TEXT_BUSY_RETRIES => {
+                retries += 1;
+                thread::sleep(Duration::from_millis(10 * retries as u64));
+            }
+            Err(error) => return Err(UpdateError::StagedCheck(error.to_string())),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn is_text_busy(error: &io::Error) -> bool {
+    // ETXTBSY is not exposed as an io::ErrorKind; this is its stable Unix errno.
+    error.raw_os_error() == Some(26)
+}
+
+#[cfg(not(unix))]
+fn is_text_busy(_error: &io::Error) -> bool {
+    false
 }
 
 fn unpack_archive(archive: &[u8], stage: &Path) -> Result<PathBuf, UpdateError> {
