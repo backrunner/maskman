@@ -49,20 +49,38 @@ artifact 已删除。随后全部 target 使用修订后的双重限制完成 10
 
 ## 未执行的 release blocker
 
-- 真实 Linux namespace 双栈 Maskman TUN forwarding 与 supervisor/worker target smoke；
+2026-08-28 范围修订：三目标 archive、SBOM 和 build-provenance attestation
+已由 release workflow run 32767328768（2026-08-24）完成并上传，不再列为
+blocker。Linux namespace 双栈 smoke 与目标机 managed NAT 移出 rc blocker，
+仅作为 CONNECT-IP/TUN release 的前置要求；独立 MASQUE 互操作记录降级为
+v1.0 的 gate。
+
+2026-08-28 第二次修订（maintainer 决定）：为轻量敏捷迭代，以下门禁对 rc
+track 全部豁免，v0.1.0-rc.1 在它们未完成的情况下发布；v1.0 前必须恢复：
+
 - macOS arm64 utun、route 和 pf 特权转发；
-- 独立 MASQUE client 与外部 mTLS 互操作；
 - 24 小时 mixed-traffic soak；
-- 目标机 managed NAT 规则应用与回滚；
-- 生产 Ed25519 key、clean-host archive/signature/SBOM/provenance 验证；
+- clean-host archive/SHA-256/Ed25519 签名验证；
 - setup -> install -> start -> status -> stop 完整记录；
 - clean-host update、checksum、signature、health-check 和 rollback 演练。
+
+注意：豁免 update 签名/回滚演练命中 maskman-guard 的 hard stop，guard 已
+明确反对并记录在案；这是 maintainer 的决定。
+
+## rc.1 benchmark 对比（2026-08-28）
+
+`benchmarks/baseline.csv` 已替换为 rc.1（commit 950f102）在同一台 Mac
+（Apple M4, aarch64-apple-darwin）上的 release 运行，toolchain 由 1.97.1
+变为 1.98.0。与 0.1.0 基线（commit 8a61384）对比：17 行中 10 行提升、
+7 行下降；大 payload（16KiB+）吞吐量各行均在 ±7% 以内，checksum 完全一致。
+小 payload 行的 ±20-50% 波动经同机同二进制背靠背重跑验证为 run-to-run
+噪声（重跑时 http/tcp/64B 回升 +36.2%），不是 codec 回归。结论：无可行动
+的性能回归，benchmark 对比门禁关闭。
 
 Linux namespace smoke 当前按 Surge server-only 范围 deferred；在重新声明
 CONNECT-IP/TUN 或完整 release profile 前必须恢复并取得特权 runner 证据。
 
-任一 blocker 未完成时，GitHub release 必须保持 draft，README 不得标记 v1.0
-完成。
+README 不得标记 v1.0 完成；v1.0 前上述豁免与 deferred 项必须全部补齐。
 
 本地新增验证包括 control socket 协议版本、0600 权限、过长路径、残留非
 socket 路径、原子 reload 拒绝、metrics endpoint、严格 journal 校验、nft/pf
