@@ -206,9 +206,16 @@ validate_version() {
 resolve_version() {
     if [[ "$requested_version" == "latest" ]]; then
         local metadata tag
-        metadata="$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --silent --show-error \
-            -H 'Accept: application/vnd.github+json' -A 'maskman-install/1' "$API_URL")" \
-            || fail "could not read the latest GitHub release"
+        # /releases/latest ignores prereleases and answers 404 while a
+        # repository has only published prereleases; fall back to the newest
+        # published entry from the release list in that case.
+        if ! metadata="$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --silent --show-error \
+            -H 'Accept: application/vnd.github+json' -A 'maskman-install/1' "$API_URL" 2>/dev/null)"; then
+            metadata="$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --silent --show-error \
+                -H 'Accept: application/vnd.github+json' -A 'maskman-install/1' \
+                "https://api.github.com/repos/${REPOSITORY}/releases?per_page=20")" \
+                || fail "could not read the GitHub release list"
+        fi
         tag="$(printf '%s' "$metadata" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
         [[ -n "$tag" ]] || fail "latest GitHub release did not contain a tag"
         requested_version="${tag#v}"
