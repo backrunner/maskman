@@ -57,12 +57,17 @@ impl ServiceSpec {
         validate_path_text(&self.config, "config")?;
         validate_path_text(&self.state_dir, "state directory")?;
         if cfg!(target_os = "macos") {
-            Ok(render_launchd(self))
-        } else if cfg!(target_os = "linux") {
-            Ok(render_systemd(self))
-        } else {
-            Err(PlatformError::ServiceManagementUnavailable)
+            return Ok(render_launchd(self));
         }
+        #[cfg(target_os = "linux")]
+        {
+            return match linux_service_manager()? {
+                LinuxServiceManager::Systemd => Ok(crate::service_systemd::render(self)),
+                LinuxServiceManager::Openrc => crate::service_openrc::render(self),
+            };
+        }
+        #[allow(unreachable_code)]
+        Err(PlatformError::ServiceManagementUnavailable)
     }
 }
 
@@ -84,10 +89,33 @@ pub fn default_state_dir() -> PathBuf {
 
 pub fn default_service_path() -> PathBuf {
     if cfg!(target_os = "macos") {
-        PathBuf::from("/Library/LaunchDaemons/top.backrunner.maskman.plist")
-    } else {
-        PathBuf::from("/etc/systemd/system/maskman.service")
+        return PathBuf::from("/Library/LaunchDaemons/top.backrunner.maskman.plist");
     }
+    #[cfg(target_os = "linux")]
+    if matches!(linux_service_manager(), Ok(LinuxServiceManager::Openrc)) {
+        return PathBuf::from("/etc/init.d/maskman");
+    }
+    PathBuf::from("/etc/systemd/system/maskman.service")
+}
+
+/// The Linux service manager owning the unit: systemd where available,
+/// otherwise OpenRC (Alpine-style hosts).
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LinuxServiceManager {
+    Systemd,
+    Openrc,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn linux_service_manager() -> Result<LinuxServiceManager, PlatformError> {
+    if ["/usr/bin/systemctl", "/bin/systemctl"].iter().any(|path| Path::new(path).is_file()) {
+        return Ok(LinuxServiceManager::Systemd);
+    }
+    if ["/sbin/rc-service", "/usr/sbin/rc-service"].iter().any(|path| Path::new(path).is_file()) {
+        return Ok(LinuxServiceManager::Openrc);
+    }
+    Err(PlatformError::ServiceManagementUnavailable)
 }
 
 pub fn install(spec: &ServiceSpec, dry_run: bool) -> Result<bool, PlatformError> {
@@ -111,10 +139,19 @@ pub fn install(spec: &ServiceSpec, dry_run: bool) -> Result<bool, PlatformError>
     }
     let _identity = crate::ensure_worker_identity(false)?;
     #[cfg(target_os = "linux")]
-    require_supported_systemd()?;
+    let manager = linux_service_manager()?;
+    #[cfg(target_os = "linux")]
+    if matches!(manager, LinuxServiceManager::Systemd) {
+        crate::service_systemd::require_supported_systemd()?;
+    }
     write_atomic(&spec.service_path, rendered.as_bytes())?;
+    #[cfg(target_os = "linux")]
+    if matches!(manager, LinuxServiceManager::Openrc) {
+        set_executable_permissions(&spec.service_path)?;
+    }
     manager_command("install", spec)?;
-    if cfg!(target_os = "linux") {
+    #[cfg(target_os = "linux")]
+    if matches!(manager, LinuxServiceManager::Systemd) {
         manager_command("enable", spec)?;
     }
     Ok(true)
@@ -141,7 +178,8 @@ pub fn uninstall(spec: &ServiceSpec, dry_run: bool) -> Result<(), PlatformError>
         if matches!(inspect_service_path(&spec.service_path)?, ServicePathState::Regular) {
             fs::remove_file(&spec.service_path).map_err(PlatformError::ServiceIo)?;
         }
-        if cfg!(target_os = "linux") {
+        #[cfg(target_os = "linux")]
+        if matches!(linux_service_manager(), Ok(LinuxServiceManager::Systemd)) {
             manager_command("daemon-reload", spec)?;
         }
     }
@@ -183,9 +221,15 @@ pub fn status(spec: &ServiceSpec) -> Result<ServiceStatus, PlatformError> {
             ))
         }
     }
-    if cfg!(target_os = "linux") {
-        status_systemd(&spec.service_path)
-    } else if cfg!(target_os = "macos") {
+    #[cfg(target_os = "linux")]
+    {
+        return match linux_service_manager()? {
+            LinuxServiceManager::Systemd => crate::service_systemd::status(&spec.service_path),
+            LinuxServiceManager::Openrc => crate::service_openrc::status(&spec.service_path),
+        };
+    }
+    #[allow(unreachable_code)]
+    if cfg!(target_os = "macos") {
         status_launchd()
     } else {
         Err(PlatformError::ServiceManagementUnavailable)
@@ -289,30 +333,6 @@ fn validate_path_text(path: &Path, field: &str) -> Result<(), PlatformError> {
     Ok(())
 }
 
-fn render_systemd(spec: &ServiceSpec) -> String {
-    format!(
-        "[Unit]\nDescription=Maskman MASQUE proxy\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=60s\nStartLimitBurst=5\n\n[Service]\nType=simple\nGroup=maskman\nExecStart={} --config {} serve\nExecReload=/bin/kill -HUP $MAINPID\nEnvironment=MASKMAN_ROLE=supervisor\nKillMode=control-group\nRestart=on-failure\nRestartSec=2s\nRuntimeDirectory=maskman\nStateDirectory=maskman\nStateDirectoryMode=0770\nConfigurationDirectory=maskman\nWorkingDirectory={}\nLimitNOFILE=65536\nCapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID\nAmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=true\nDeviceAllow=/dev/net/tun rw\nRestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK\nRestrictSUIDSGID=true\nLockPersonality=true\nReadWritePaths={}\nReadOnlyPaths={}\n\n[Install]\nWantedBy=multi-user.target\n",
-        systemd_quote(&spec.binary),
-        systemd_quote(&spec.config),
-        systemd_path(&spec.state_dir),
-        systemd_path(&spec.state_dir),
-        systemd_path(spec.config.parent().unwrap_or_else(|| Path::new("/"))),
-    )
-}
-
-/// Render a path for a systemd path directive. Quote only when the path needs
-/// it: old systemd releases do not strip quotes from path settings and treat
-/// them as literal characters, so routine paths must stay unquoted. `%` is
-/// always escaped to avoid specifier expansion.
-fn systemd_path(path: &Path) -> String {
-    let value = path.to_string_lossy().replace('%', "%%");
-    if value.bytes().any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'')) {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-    } else {
-        value
-    }
-}
-
 fn render_launchd(spec: &ServiceSpec) -> String {
     let log_dir = spec.state_dir.join("logs");
     format!(
@@ -322,47 +342,6 @@ fn render_launchd(spec: &ServiceSpec) -> String {
         xml_escape(&log_dir),
         xml_escape(&log_dir),
     )
-}
-
-/// Minimum systemd release the rendered unit relies on: StateDirectory,
-/// ConfigurationDirectory, LockPersonality, and StateDirectoryMode all landed
-/// in v235. Older releases silently ignore the sandbox directives, which is
-/// not an acceptable degradation, so install refuses them instead.
-#[cfg(target_os = "linux")]
-const MIN_SYSTEMD_VERSION: u32 = 235;
-
-#[cfg(target_os = "linux")]
-fn require_supported_systemd() -> Result<(), PlatformError> {
-    let output = Command::new("systemctl")
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(PlatformError::ServiceCommand)?;
-    if !output.status.success() {
-        return Err(PlatformError::ServiceCommand(std::io::Error::other(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        )));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let major = systemd_major_version(&stdout).ok_or_else(|| {
-        PlatformError::InvalidService("cannot parse `systemctl --version` output".into())
-    })?;
-    if major < MIN_SYSTEMD_VERSION {
-        return Err(PlatformError::InvalidService(format!(
-            "systemd {major} is too old; maskman requires systemd >= {MIN_SYSTEMD_VERSION} for its sandboxed unit — upgrade the distribution instead of weakening the unit"
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn systemd_major_version(version_output: &str) -> Option<u32> {
-    version_output.lines().next()?.split_whitespace().nth(1)?.parse().ok()
-}
-
-fn systemd_quote(path: &Path) -> String {
-    let value = path.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
-    format!("\"{value}\"")
 }
 
 fn xml_escape(path: &Path) -> String {
@@ -378,15 +357,30 @@ fn manager_command(action: &str, spec: &ServiceSpec) -> Result<(), PlatformError
     let mut command = if cfg!(target_os = "macos") {
         launchd_command(action, &spec.service_path)
     } else if cfg!(target_os = "linux") {
-        systemd_command(action, &spec.service_path)?
+        #[cfg(target_os = "linux")]
+        match linux_service_manager()? {
+            LinuxServiceManager::Systemd => {
+                crate::service_systemd::command(action, &spec.service_path)?
+            }
+            LinuxServiceManager::Openrc => {
+                crate::service_openrc::command(action, &spec.service_path)?
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        return Err(PlatformError::ServiceManagementUnavailable);
     } else {
         return Err(PlatformError::ServiceManagementUnavailable);
     };
     let output = command.stdin(Stdio::null()).output().map_err(PlatformError::ServiceCommand)?;
-    let expected_idempotent_error = matches!(action, "install" | "uninstall")
-        && String::from_utf8_lossy(&output.stderr)
-            .to_ascii_lowercase()
-            .contains(if action == "install" { "already" } else { "not found" });
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    let tolerated: &[&str] = match action {
+        "install" => &["already"],
+        // systemd reports "not found"; OpenRC rc-update reports
+        // "is not in the runlevel" for a service that was never added.
+        "uninstall" => &["not found", "not in the runlevel"],
+        _ => &[],
+    };
+    let expected_idempotent_error = tolerated.iter().any(|needle| stderr.contains(needle));
     if output.status.success() || expected_idempotent_error {
         Ok(())
     } else {
@@ -394,40 +388,6 @@ fn manager_command(action: &str, spec: &ServiceSpec) -> Result<(), PlatformError
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         )))
     }
-}
-
-fn systemd_command(action: &str, service_path: &Path) -> Result<Command, PlatformError> {
-    let unit = service_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .filter(|value| value.ends_with(".service"))
-        .ok_or_else(|| {
-            PlatformError::InvalidService(
-                "systemd service path must have a .service file name".into(),
-            )
-        })?;
-    let mut command = Command::new("systemctl");
-    match action {
-        "install" => {
-            command.args(["daemon-reload", "--quiet"]);
-        }
-        "daemon-reload" => {
-            command.args(["daemon-reload", "--quiet"]);
-        }
-        "uninstall" => {
-            command.args(["disable", "--now", unit]);
-        }
-        "enable" => {
-            command.args(["enable", unit]);
-        }
-        "reload" => {
-            command.args(["reload", unit]);
-        }
-        _ => {
-            command.args([action, unit]);
-        }
-    }
-    Ok(command)
 }
 
 fn launchd_command(action: &str, service_path: &Path) -> Command {
@@ -451,41 +411,6 @@ fn launchd_command(action: &str, service_path: &Path) -> Command {
         _ => {}
     }
     command
-}
-
-fn status_systemd(service_path: &Path) -> Result<ServiceStatus, PlatformError> {
-    let unit = service_path
-        .file_name()
-        .and_then(|value| value.to_str())
-        .filter(|value| value.ends_with(".service"))
-        .ok_or_else(|| {
-            PlatformError::InvalidService(
-                "systemd service path must have a .service file name".into(),
-            )
-        })?;
-    let output = Command::new("systemctl")
-        .args(["show", unit, "--property=ActiveState,MainPID", "--value"])
-        .output()
-        .map_err(PlatformError::ServiceCommand)?;
-    if !output.status.success() {
-        return Ok(ServiceStatus {
-            installed: true,
-            running: false,
-            pid: None,
-            detail: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        });
-    }
-    let output_text = String::from_utf8_lossy(&output.stdout);
-    let lines = output_text.lines().collect::<Vec<_>>();
-    let running = lines.first().copied() == Some("active");
-    let pid =
-        lines.get(1).and_then(|value| value.trim().parse::<u32>().ok()).filter(|pid| *pid > 0);
-    Ok(ServiceStatus {
-        installed: true,
-        running,
-        pid,
-        detail: lines.first().unwrap_or(&"unknown").to_string(),
-    })
 }
 
 fn status_launchd() -> Result<ServiceStatus, PlatformError> {
@@ -517,6 +442,13 @@ fn set_service_permissions(path: &Path) -> Result<(), PlatformError> {
 #[cfg(not(unix))]
 fn set_service_permissions(_path: &Path) -> Result<(), PlatformError> {
     Ok(())
+}
+
+// OpenRC service scripts must be executable, unlike declarative unit files.
+#[cfg(target_os = "linux")]
+fn set_executable_permissions(path: &Path) -> Result<(), PlatformError> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).map_err(PlatformError::ServiceIo)
 }
 
 #[cfg(test)]

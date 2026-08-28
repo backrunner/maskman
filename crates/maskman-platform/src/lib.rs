@@ -15,6 +15,10 @@ mod tun;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "linux")]
+mod service_openrc;
+#[cfg(target_os = "linux")]
+mod service_systemd;
 
 use thiserror::Error;
 

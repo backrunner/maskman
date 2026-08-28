@@ -428,12 +428,17 @@ pub fn control_peer_allowed(uid: u32) -> bool {
 
 #[cfg(target_os = "linux")]
 pub fn worker_identity_available() -> bool {
+    // The systemd unit and the worker spawn need both halves; a pre-existing
+    // user without the group previously slipped through and broke
+    // Group=maskman resolution.
     nix::unistd::User::from_name(WORKER_USER).ok().flatten().is_some()
+        && nix::unistd::Group::from_name(WORKER_GROUP).ok().flatten().is_some()
 }
 
 #[cfg(target_os = "macos")]
 pub fn worker_identity_available() -> bool {
     nix::unistd::User::from_name(WORKER_USER).ok().flatten().is_some()
+        && nix::unistd::Group::from_name(WORKER_GROUP).ok().flatten().is_some()
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

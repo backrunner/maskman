@@ -58,30 +58,81 @@ pub fn ensure_worker_identity(dry_run: bool) -> Result<WorkerIdentityProvision, 
 
 #[cfg(target_os = "linux")]
 fn create_linux_identity() -> Result<(), PlatformError> {
-    let useradd = ["/usr/sbin/useradd", "/usr/bin/useradd"]
-        .into_iter()
-        .find(|path| std::path::Path::new(path).is_file())
-        .ok_or_else(|| {
-            PlatformError::InvalidService(
-                "useradd is unavailable; install the maskman system account manually".into(),
-            )
-        })?;
+    let user_exists = nix::unistd::User::from_name(WORKER_USER)
+        .map_err(|error| PlatformError::Network(format!("lookup worker user: {error}")))?
+        .is_some();
+    let group_exists = nix::unistd::Group::from_name(WORKER_GROUP)
+        .map_err(|error| PlatformError::Network(format!("lookup worker group: {error}")))?
+        .is_some();
+    // Create the two halves independently: a pre-existing maskman user must
+    // not skip group creation, and a pre-existing group must not fail user
+    // creation.
+    if !group_exists {
+        create_linux_group()?;
+    }
+    if !user_exists {
+        create_linux_user()?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn create_linux_group() -> Result<(), PlatformError> {
+    if let Some(groupadd) = linux_tool(&["/usr/sbin/groupadd", "/usr/bin/groupadd"]) {
+        let mut command = Command::new(groupadd);
+        command.args(["--system", WORKER_GROUP]).stdin(Stdio::null());
+        return run_checked(&mut command, "create Linux worker group");
+    }
+    let addgroup = linux_tool(&["/usr/sbin/addgroup", "/sbin/addgroup", "/bin/addgroup"])
+        .ok_or_else(busybox_tools_missing)?;
+    let mut command = Command::new(addgroup);
+    command.args(["-S", WORKER_GROUP]).stdin(Stdio::null());
+    run_checked(&mut command, "create BusyBox worker group")
+}
+
+#[cfg(target_os = "linux")]
+fn create_linux_user() -> Result<(), PlatformError> {
     let shell = ["/usr/sbin/nologin", "/sbin/nologin", "/bin/false"]
         .into_iter()
         .find(|path| std::path::Path::new(path).is_file())
         .unwrap_or("/bin/false");
-    let group = nix::unistd::Group::from_name(WORKER_GROUP)
-        .map_err(|error| PlatformError::Network(format!("lookup worker group: {error}")))?;
-    let mut command = Command::new(useradd);
-    command.args(["--system", "--no-create-home", "--home-dir", "/var/empty", "--shell", shell]);
-    if group.is_some() {
-        command.args(["--gid", WORKER_GROUP]);
-    } else {
-        command.arg("--user-group");
+    if let Some(useradd) = linux_tool(&["/usr/sbin/useradd", "/usr/bin/useradd"]) {
+        let mut command = Command::new(useradd);
+        command
+            .args([
+                "--system",
+                "--no-create-home",
+                "--home-dir",
+                "/var/empty",
+                "--shell",
+                shell,
+                "--gid",
+                WORKER_GROUP,
+                WORKER_USER,
+            ])
+            .stdin(Stdio::null());
+        return run_checked(&mut command, "create Linux worker identity");
     }
-    command.arg(WORKER_USER).stdin(Stdio::null());
-    run_checked(&mut command, "create Linux worker identity")?;
-    Ok(())
+    // BusyBox userland (Alpine) has no useradd; use adduser instead.
+    let adduser = linux_tool(&["/usr/sbin/adduser", "/sbin/adduser", "/bin/adduser"])
+        .ok_or_else(busybox_tools_missing)?;
+    let mut command = Command::new(adduser);
+    command
+        .args(["-S", "-D", "-H", "-h", "/var/empty", "-s", shell, "-G", WORKER_GROUP, WORKER_USER])
+        .stdin(Stdio::null());
+    run_checked(&mut command, "create BusyBox worker identity")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_tool<'a>(candidates: &'a [&'a str]) -> Option<&'a str> {
+    candidates.iter().copied().find(|path| std::path::Path::new(path).is_file())
+}
+
+#[cfg(target_os = "linux")]
+fn busybox_tools_missing() -> PlatformError {
+    PlatformError::InvalidService(
+        "useradd/adduser are unavailable; install the maskman system account manually".into(),
+    )
 }
 
 #[cfg(target_os = "macos")]
