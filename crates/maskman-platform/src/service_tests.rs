@@ -1,8 +1,8 @@
 use super::{
-    inspect_service_path, install, render_launchd, render_systemd, status, uninstall,
+    inspect_service_path, install, render_launchd, render_systemd, status, systemd_path, uninstall,
     ServicePathState, ServiceSpec,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn spec() -> ServiceSpec {
     ServiceSpec {
@@ -25,6 +25,36 @@ fn systemd_template_has_hardening_and_absolute_exec() {
     assert!(output.contains("RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK"));
     assert!(output.contains("ExecStart=\"/usr/local/bin/maskman\""));
     assert!(!output.contains("sh -c"));
+}
+
+#[test]
+fn systemd_template_keeps_routine_paths_unquoted_and_start_limits_in_unit() {
+    let output = render_systemd(&spec());
+    // Old systemd releases do not strip quotes from path settings; routine
+    // absolute paths must reach the unit file without any quote characters.
+    assert!(output.contains("WorkingDirectory=/var/lib/maskman\n"));
+    assert!(output.contains("ReadWritePaths=/var/lib/maskman\n"));
+    assert!(output.contains("ReadOnlyPaths=/etc/maskman\n"));
+    // StartLimit* belongs to [Unit] since systemd v230.
+    assert!(output.starts_with(
+        "[Unit]\nDescription=Maskman MASQUE proxy\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=60s\nStartLimitBurst=5\n"
+    ));
+}
+
+#[test]
+fn systemd_path_quotes_only_when_needed_and_escapes_specifiers() {
+    assert_eq!(systemd_path(Path::new("/var/lib/maskman")), "/var/lib/maskman");
+    assert_eq!(systemd_path(Path::new("/var/lib/100%")), "/var/lib/100%%");
+    assert_eq!(systemd_path(Path::new("/var/lib/my maskman")), "\"/var/lib/my maskman\"");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn systemd_major_version_parses_distribution_strings() {
+    use super::systemd_major_version;
+    assert_eq!(systemd_major_version("systemd 249 (249.11-0ubuntu3.12)"), Some(249));
+    assert_eq!(systemd_major_version("systemd 235 (235)"), Some(235));
+    assert_eq!(systemd_major_version("garbage"), None);
 }
 
 #[test]

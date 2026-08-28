@@ -110,6 +110,8 @@ pub fn install(spec: &ServiceSpec, dry_run: bool) -> Result<bool, PlatformError>
         return Ok(!matches!(path_state, ServicePathState::Missing));
     }
     let _identity = crate::ensure_worker_identity(false)?;
+    #[cfg(target_os = "linux")]
+    require_supported_systemd()?;
     write_atomic(&spec.service_path, rendered.as_bytes())?;
     manager_command("install", spec)?;
     if cfg!(target_os = "linux") {
@@ -289,13 +291,26 @@ fn validate_path_text(path: &Path, field: &str) -> Result<(), PlatformError> {
 
 fn render_systemd(spec: &ServiceSpec) -> String {
     format!(
-        "[Unit]\nDescription=Maskman MASQUE proxy\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nGroup=maskman\nExecStart={} --config {} serve\nExecReload=/bin/kill -HUP $MAINPID\nEnvironment=MASKMAN_ROLE=supervisor\nKillMode=control-group\nRestart=on-failure\nRestartSec=2s\nStartLimitIntervalSec=60s\nStartLimitBurst=5\nRuntimeDirectory=maskman\nStateDirectory=maskman\nStateDirectoryMode=0770\nConfigurationDirectory=maskman\nWorkingDirectory={}\nLimitNOFILE=65536\nCapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID\nAmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=true\nDeviceAllow=/dev/net/tun rw\nRestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK\nRestrictSUIDSGID=true\nLockPersonality=true\nReadWritePaths={}\nReadOnlyPaths={}\n\n[Install]\nWantedBy=multi-user.target\n",
+        "[Unit]\nDescription=Maskman MASQUE proxy\nAfter=network-online.target\nWants=network-online.target\nStartLimitIntervalSec=60s\nStartLimitBurst=5\n\n[Service]\nType=simple\nGroup=maskman\nExecStart={} --config {} serve\nExecReload=/bin/kill -HUP $MAINPID\nEnvironment=MASKMAN_ROLE=supervisor\nKillMode=control-group\nRestart=on-failure\nRestartSec=2s\nRuntimeDirectory=maskman\nStateDirectory=maskman\nStateDirectoryMode=0770\nConfigurationDirectory=maskman\nWorkingDirectory={}\nLimitNOFILE=65536\nCapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID\nAmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=strict\nProtectHome=true\nDeviceAllow=/dev/net/tun rw\nRestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK\nRestrictSUIDSGID=true\nLockPersonality=true\nReadWritePaths={}\nReadOnlyPaths={}\n\n[Install]\nWantedBy=multi-user.target\n",
         systemd_quote(&spec.binary),
         systemd_quote(&spec.config),
-        systemd_quote(&spec.state_dir),
-        systemd_quote(&spec.state_dir),
-        systemd_quote(spec.config.parent().unwrap_or_else(|| Path::new("/"))),
+        systemd_path(&spec.state_dir),
+        systemd_path(&spec.state_dir),
+        systemd_path(spec.config.parent().unwrap_or_else(|| Path::new("/"))),
     )
+}
+
+/// Render a path for a systemd path directive. Quote only when the path needs
+/// it: old systemd releases do not strip quotes from path settings and treat
+/// them as literal characters, so routine paths must stay unquoted. `%` is
+/// always escaped to avoid specifier expansion.
+fn systemd_path(path: &Path) -> String {
+    let value = path.to_string_lossy().replace('%', "%%");
+    if value.bytes().any(|byte| byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'')) {
+        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    } else {
+        value
+    }
 }
 
 fn render_launchd(spec: &ServiceSpec) -> String {
@@ -307,6 +322,42 @@ fn render_launchd(spec: &ServiceSpec) -> String {
         xml_escape(&log_dir),
         xml_escape(&log_dir),
     )
+}
+
+/// Minimum systemd release the rendered unit relies on: StateDirectory,
+/// ConfigurationDirectory, LockPersonality, and StateDirectoryMode all landed
+/// in v235. Older releases silently ignore the sandbox directives, which is
+/// not an acceptable degradation, so install refuses them instead.
+#[cfg(target_os = "linux")]
+const MIN_SYSTEMD_VERSION: u32 = 235;
+
+#[cfg(target_os = "linux")]
+fn require_supported_systemd() -> Result<(), PlatformError> {
+    let output = Command::new("systemctl")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(PlatformError::ServiceCommand)?;
+    if !output.status.success() {
+        return Err(PlatformError::ServiceCommand(std::io::Error::other(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let major = systemd_major_version(&stdout).ok_or_else(|| {
+        PlatformError::InvalidService("cannot parse `systemctl --version` output".into())
+    })?;
+    if major < MIN_SYSTEMD_VERSION {
+        return Err(PlatformError::InvalidService(format!(
+            "systemd {major} is too old; maskman requires systemd >= {MIN_SYSTEMD_VERSION} for its sandboxed unit — upgrade the distribution instead of weakening the unit"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn systemd_major_version(version_output: &str) -> Option<u32> {
+    version_output.lines().next()?.split_whitespace().nth(1)?.parse().ok()
 }
 
 fn systemd_quote(path: &Path) -> String {
