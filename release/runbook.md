@@ -6,6 +6,11 @@ as production evidence.
 
 ## Start safely
 
+Prerequisites: Linux with systemd >= 235 (the unit relies on StateDirectory
+and sandbox directives that older releases silently ignore) or macOS with
+launchd; OpenSSL >= 1.1.1 or python3-cryptography for installer signature
+verification.
+
 1. Validate the exact configuration used by the service:
 
    ```text

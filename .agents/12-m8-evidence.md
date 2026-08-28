@@ -67,6 +67,20 @@ track 全部豁免，v0.1.0-rc.1 在它们未完成的情况下发布；v1.0 前
 注意：豁免 update 签名/回滚演练命中 maskman-guard 的 hard stop，guard 已
 明确反对并记录在案；这是 maintainer 的决定。
 
+## rc.1 clean-host 安装实测发现（2026-08-28）
+
+在一台外部 Linux VPS（x86_64）上实际执行 `scripts/install.sh` 暴露出三个
+脚本/平台问题，均已修复，资产与签名本身验证无误：
+
+- 仅含 prerelease 的仓库中 `/releases/latest` 返回 404，安装脚本改为回退
+  release 列表（180d0fc）。
+- 目标机 openssl 的 `pkeyutl` 不支持 `-rawin`（LibreSSL/裁剪构建），安装
+  脚本改为探测验签器并回退 python3-cryptography，绝不跳过验签（cebd4b0）。
+- 目标机 systemd 低于 v230：不剥 path 指令的引号导致 `WorkingDirectory`
+  致命错误，且不认识 `StartLimitIntervalSec`。模板改为路径按需加引号、
+  StartLimit 移入 `[Unit]`，并在 install 与安装脚本中硬性要求
+  systemd >= 235（StateDirectory 等沙箱指令的最低版本），拒绝静默降级。
+
 ## rc.1 benchmark 对比（2026-08-28）
 
 `benchmarks/baseline.csv` 已替换为 rc.1（commit 950f102）在同一台 Mac

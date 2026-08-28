@@ -167,6 +167,11 @@ detect_platform() {
             *) fail "unsupported Linux distribution: ${distro}" ;;
         esac
         command -v systemctl >/dev/null 2>&1 || fail "systemd/systemctl is required on Linux"
+        local systemd_major
+        systemd_major="$(systemctl --version 2>/dev/null | awk 'NR == 1 {print $2}')"
+        [[ "$systemd_major" =~ ^[0-9]+$ ]] || fail "cannot determine the systemd version"
+        ((systemd_major >= 235)) \
+            || fail "systemd $systemd_major is too old; maskman requires systemd >= 235 for its sandboxed unit"
     else
         package_family="macos"
         command -v launchctl >/dev/null 2>&1 || fail "launchctl is required on macOS"
