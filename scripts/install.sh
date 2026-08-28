@@ -264,7 +264,9 @@ resolve_version() {
                 "https://api.github.com/repos/${REPOSITORY}/releases?per_page=20")" \
                 || fail "could not read the GitHub release list"
         fi
-        tag="$(printf '%s' "$metadata" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+        tag="$(printf '%s' "$metadata" \
+            | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n 1 \
+            | sed 's/.*"\([^"]*\)"$/\1/')"
         [[ -n "$tag" ]] || fail "latest GitHub release did not contain a tag"
         requested_version="${tag#v}"
     else
