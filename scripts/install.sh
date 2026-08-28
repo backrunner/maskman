@@ -277,9 +277,11 @@ verify_release_signature() {
     openssl pkey -pubin -inform DER -in "$public_key_der" -out "$public_key_pem" \
         >/dev/null 2>&1 \
         || fail "release public key encoding is invalid"
-    openssl pkeyutl -verify -rawin -pubin -inkey "$public_key_pem" \
-        -in "$archive" -sigfile "$signature" >/dev/null 2>&1 \
-        || fail "release Ed25519 signature verification failed"
+    if ! openssl pkeyutl -verify -rawin -pubin -inkey "$public_key_pem" \
+        -in "$archive" -sigfile "$signature" 2>"$tmp_dir/verify.err"; then
+        sed -n '1,5p' "$tmp_dir/verify.err" >&2
+        fail "release Ed25519 signature verification failed; check \`openssl version\` and re-download this installer in case it predates the current release trust anchor"
+    fi
 }
 
 install_binary() {
