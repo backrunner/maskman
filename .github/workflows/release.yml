@@ -155,4 +155,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "${GITHUB_REF_NAME}" --draft --verify-tag --title "Maskman ${GITHUB_REF_NAME}" dist/*
+          prerelease_args=()
+          case "${GITHUB_REF_NAME}" in
+            *-*) prerelease_args=(--prerelease) ;;
+          esac
+          gh release create "${GITHUB_REF_NAME}" --draft "${prerelease_args[@]}" --verify-tag --title "Maskman ${GITHUB_REF_NAME}" dist/*
