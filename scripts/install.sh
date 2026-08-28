@@ -19,6 +19,7 @@ readonly RELEASE_PUBLIC_KEY_HEX="c88148297ffc380d4a86274885318d4cec1303e645ca96d
 color_mode="auto"
 requested_version="${MASKMAN_VERSION:-latest}"
 config_path=""
+signature_verifier=""
 force_config=0
 dry_run=0
 use_color=0
@@ -177,13 +178,32 @@ detect_platform() {
 require_tools() {
     command -v curl >/dev/null 2>&1 || fail "curl is required"
     command -v tar >/dev/null 2>&1 || fail "tar is required"
-    command -v openssl >/dev/null 2>&1 || fail "openssl is required for release signature verification"
-    command -v xxd >/dev/null 2>&1 || fail "xxd is required for release signature verification"
     if [[ "$os" == "Linux" ]]; then
         command -v sha256sum >/dev/null 2>&1 || fail "sha256sum is required"
     else
         command -v shasum >/dev/null 2>&1 || fail "shasum is required"
     fi
+    select_signature_verifier
+}
+
+# Pick an Ed25519 verifier available on this host. Modern OpenSSL verifies
+# with `pkeyutl -rawin`; hosts whose openssl lacks -rawin (for example
+# LibreSSL or cut-down builds) fall back to python3-cryptography. Signature
+# verification is never skipped.
+select_signature_verifier() {
+    if command -v openssl >/dev/null 2>&1 && command -v xxd >/dev/null 2>&1 \
+        && { openssl pkeyutl -help 2>&1 || true; } | grep -q -- '-rawin'; then
+        signature_verifier="openssl"
+        return 0
+    fi
+    if command -v python3 >/dev/null 2>&1 \
+        && python3 -c \
+            'from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey' \
+            >/dev/null 2>&1; then
+        signature_verifier="python"
+        return 0
+    fi
+    fail "cannot verify Ed25519 release signatures on this host: install OpenSSL >= 1.1.1 with xxd, or python3-cryptography"
 }
 
 validate_release_key() {
@@ -266,6 +286,30 @@ download_release() {
 verify_release_signature() {
     local archive="$1"
     local signature="$2"
+
+    if [[ "$signature_verifier" == "python" ]]; then
+        if ! python3 - "$RELEASE_PUBLIC_KEY_HEX" "$archive" "$signature" \
+            2>"$tmp_dir/verify.err" <<'PY'; then
+import sys
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(sys.argv[1]))
+with open(sys.argv[2], "rb") as handle:
+    data = handle.read()
+with open(sys.argv[3], "rb") as handle:
+    signature = handle.read()
+try:
+    key.verify(signature, data)
+except InvalidSignature:
+    sys.exit(1)
+PY
+            sed -n '1,5p' "$tmp_dir/verify.err" >&2
+            fail "release Ed25519 signature verification failed"
+        fi
+        return 0
+    fi
+
     local public_key_der="$tmp_dir/release-public-key.der"
     local public_key_pem="$tmp_dir/release-public-key.pem"
 
@@ -280,7 +324,7 @@ verify_release_signature() {
     if ! openssl pkeyutl -verify -rawin -pubin -inkey "$public_key_pem" \
         -in "$archive" -sigfile "$signature" 2>"$tmp_dir/verify.err"; then
         sed -n '1,5p' "$tmp_dir/verify.err" >&2
-        fail "release Ed25519 signature verification failed; check \`openssl version\` and re-download this installer in case it predates the current release trust anchor"
+        fail "release Ed25519 signature verification failed"
     fi
 }
 
