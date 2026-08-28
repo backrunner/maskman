@@ -81,6 +81,14 @@ track 全部豁免，v0.1.0-rc.1 在它们未完成的情况下发布；v1.0 前
   StartLimit 移入 `[Unit]`，并在 install 与安装脚本中硬性要求
   systemd >= 235（StateDirectory 等沙箱指令的最低版本），拒绝静默降级。
 
+同日应 maintainer 要求补齐 Alpine 兼容：platform 新增 OpenRC service
+manager（supervise-daemon + checkpath，无 systemd 沙箱指令，已在 runbook
+明确说明），service 代码按 manager 拆分为 `service_systemd.rs` 与
+`service_openrc.rs`；身份创建支持 busybox `addgroup/adduser` 回退，并修复
+`worker_identity_available` 只校验用户不校验组导致 `Group=maskman` 解析
+失败的问题；安装脚本支持 Alpine 检测（rc-service/rc-update）并内嵌 PEM
+公钥，移除对 xxd 的依赖。
+
 ## rc.1 benchmark 对比（2026-08-28）
 
 `benchmarks/baseline.csv` 已替换为 rc.1（commit 950f102）在同一台 Mac

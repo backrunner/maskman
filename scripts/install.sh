@@ -14,7 +14,12 @@ readonly MAX_ARCHIVE_BYTES=$((128 * 1024 * 1024))
 readonly MAX_BINARY_BYTES=$((64 * 1024 * 1024))
 # Public Ed25519 trust anchor for GitHub release archives. Rotate it only in a
 # reviewed commit together with the matching GitHub Actions secret/variable.
+# The PEM is the RFC 8410 SubjectPublicKeyInfo of the same key, embedded so the
+# installer does not depend on xxd to rebuild the DER at runtime.
 readonly RELEASE_PUBLIC_KEY_HEX="c88148297ffc380d4a86274885318d4cec1303e645ca96d69b2af6baf3099c5a"
+readonly RELEASE_PUBLIC_KEY_PEM="-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAyIFIKX/8OA1KhidIhTGNTOwTA+ZFypbWmyr2uvMJnFo=
+-----END PUBLIC KEY-----"
 
 color_mode="auto"
 requested_version="${MASKMAN_VERSION:-latest}"
@@ -164,14 +169,20 @@ detect_platform() {
             *,debian,*|*,ubuntu,*|*,linuxmint,*) package_family="debian" ;;
             *,rhel,*|*,fedora,*|*,centos,*|*,rocky,*|*,almalinux,*) package_family="redhat" ;;
             *,arch,*|*,manjaro,*) package_family="arch" ;;
+            *,alpine,*) package_family="alpine" ;;
             *) fail "unsupported Linux distribution: ${distro}" ;;
         esac
-        command -v systemctl >/dev/null 2>&1 || fail "systemd/systemctl is required on Linux"
-        local systemd_major
-        systemd_major="$(systemctl --version 2>/dev/null | awk 'NR == 1 {print $2}')"
-        [[ "$systemd_major" =~ ^[0-9]+$ ]] || fail "cannot determine the systemd version"
-        ((systemd_major >= 235)) \
-            || fail "systemd $systemd_major is too old; maskman requires systemd >= 235 for its sandboxed unit"
+        if [[ "$package_family" == "alpine" ]]; then
+            command -v rc-service >/dev/null 2>&1 || fail "OpenRC (rc-service) is required on Alpine"
+            command -v rc-update >/dev/null 2>&1 || fail "OpenRC (rc-update) is required on Alpine"
+        else
+            command -v systemctl >/dev/null 2>&1 || fail "systemd/systemctl is required on Linux"
+            local systemd_major
+            systemd_major="$(systemctl --version 2>/dev/null | awk 'NR == 1 {print $2}')"
+            [[ "$systemd_major" =~ ^[0-9]+$ ]] || fail "cannot determine the systemd version"
+            ((systemd_major >= 235)) \
+                || fail "systemd $systemd_major is too old; maskman requires systemd >= 235 for its sandboxed unit"
+        fi
     else
         package_family="macos"
         command -v launchctl >/dev/null 2>&1 || fail "launchctl is required on macOS"
@@ -196,7 +207,7 @@ require_tools() {
 # LibreSSL or cut-down builds) fall back to python3-cryptography. Signature
 # verification is never skipped.
 select_signature_verifier() {
-    if command -v openssl >/dev/null 2>&1 && command -v xxd >/dev/null 2>&1 \
+    if command -v openssl >/dev/null 2>&1 \
         && { openssl pkeyutl -help 2>&1 || true; } | grep -q -- '-rawin'; then
         signature_verifier="openssl"
         return 0
@@ -208,7 +219,7 @@ select_signature_verifier() {
         signature_verifier="python"
         return 0
     fi
-    fail "cannot verify Ed25519 release signatures on this host: install OpenSSL >= 1.1.1 with xxd, or python3-cryptography"
+    fail "cannot verify Ed25519 release signatures on this host: install OpenSSL >= 1.1.1 or python3-cryptography"
 }
 
 validate_release_key() {
@@ -217,6 +228,18 @@ validate_release_key() {
     [[ "${RELEASE_PUBLIC_KEY_HEX,,}" != \
         "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a" ]] \
         || fail "refusing the public RFC 8032 test key as a release trust anchor"
+    # The openssl verifier consumes the PEM while the python verifier consumes
+    # the hex; cross-check the two embedded forms so a partial key rotation
+    # cannot silently split the trust anchors.
+    if [[ "$signature_verifier" == "openssl" ]]; then
+        local derived
+        derived="$(printf '%s\n' "$RELEASE_PUBLIC_KEY_PEM" \
+            | openssl pkey -pubin -outform DER 2>/dev/null \
+            | tail -c 32 | od -An -tx1 | tr -d ' \n')" \
+            || fail "the embedded release public key PEM is invalid"
+        [[ "$derived" == "${RELEASE_PUBLIC_KEY_HEX,,}" ]] \
+            || fail "the embedded release key PEM does not match the hex trust anchor"
+    fi
 }
 
 require_root() {
@@ -315,17 +338,8 @@ PY
         return 0
     fi
 
-    local public_key_der="$tmp_dir/release-public-key.der"
     local public_key_pem="$tmp_dir/release-public-key.pem"
-
-    # Ed25519 SubjectPublicKeyInfo: RFC 8410 algorithm identifier plus raw key.
-    {
-        printf '%s' '302a300506032b6570032100' | xxd -r -p
-        printf '%s' "$RELEASE_PUBLIC_KEY_HEX" | xxd -r -p
-    } >"$public_key_der"
-    openssl pkey -pubin -inform DER -in "$public_key_der" -out "$public_key_pem" \
-        >/dev/null 2>&1 \
-        || fail "release public key encoding is invalid"
+    printf '%s\n' "$RELEASE_PUBLIC_KEY_PEM" >"$public_key_pem"
     if ! openssl pkeyutl -verify -rawin -pubin -inkey "$public_key_pem" \
         -in "$archive" -sigfile "$signature" 2>"$tmp_dir/verify.err"; then
         sed -n '1,5p' "$tmp_dir/verify.err" >&2
