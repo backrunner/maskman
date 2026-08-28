@@ -56,6 +56,7 @@ async fn create(path: &Path, args: TokenCreateArgs, output: Output) -> Result<()
     write_config_with_worker_access(path, &document)?;
     output.success(format!("created bearer token {id} for principal {principal}"));
     println!("Bearer token (shown once): mm_{id}_{encoded}");
+    super::print_surge_credentials(&document, &format!("mm_{id}_{encoded}"));
     if args.reload {
         reload_service(path).await?;
         output.success("requested service reload");

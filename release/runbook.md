@@ -61,6 +61,24 @@ maskman --config /etc/maskman/config.toml auth token revoke tok_old --yes --relo
 The configuration stores only a SHA-256 digest of the bearer secret. `list`
 never prints the secret.
 
+## Connect a Surge client
+
+Surge authenticates MASQUE proxies with HTTP Basic credentials
+(`username`/`password` in the proxy declaration). Maskman maps the username to
+the bearer token ID and the password to the token secret. Both `setup` and
+`auth token create` print a ready-to-paste declaration next to the one-time
+bearer token:
+
+```text
+Surge (shown once): maskman = masque, <server-address>, 443, username=tok_xxx, password=<secret>
+```
+
+Replace `<server-address>` with the public address and paste the line into the
+Surge `[Proxy]` section. With development self-signed TLS, append
+`, skip-cert-verify=true` until a trusted certificate is deployed. If the
+one-time output was lost, create a fresh token with `auth token create` and
+revoke the old ID; the secret cannot be recovered afterwards.
+
 ## Upgrade and rollback
 
 First perform a signed metadata check without changing the binary:

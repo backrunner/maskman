@@ -83,6 +83,7 @@ pub fn run(config: Option<&Path>, mut args: SetupArgs, output: Output) -> Result
     }
     if let Some(token) = token {
         println!("Bearer token (shown once): {token}");
+        super::print_surge_credentials(&document, &token);
     }
     if !args.development && !validate_supplied_tls {
         output.warning(
